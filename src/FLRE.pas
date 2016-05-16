@@ -3439,7 +3439,7 @@ end;
 {$endif}
 {$endif}
 
-{$ifdef cpux86_64}
+{$if defined(cpux86_64) and not defined(fpc)}
 
 // Thanks to Jeffrey Lim
 
