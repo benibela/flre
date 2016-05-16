@@ -145,7 +145,7 @@ uses {$ifdef windows}Windows,{$endif}{$ifdef unix}dl,BaseUnix,Unix,UnixType,{$en
 
 const FLREVersion=$00000004;
 
-      FLREVersionString='1.00.2016.02.04.13.17.0000';
+      FLREVersionString='1.00.2016.03.22.04.46.0000';
 
       FLREMaxPrefixCharClasses=32;
 
@@ -161,7 +161,8 @@ const FLREVersion=$00000004;
       carfLONGEST=1 shl 7;
       carfMULTIMATCH=1 shl 8;
       carfUTF8=1 shl 9;
-      carfDELIMITERS=1 shl 10;
+      carfONLYFASTOPTIMIZATIONS=1 shl 10;
+      carfDELIMITERS=1 shl 11;
 
 type EFLRE=class(Exception);
 
@@ -171,6 +172,9 @@ type EFLRE=class(Exception);
 
      PFLRERawByteChar=PAnsiChar;
      TFLRERawByteChar=ansichar;
+
+     PFLRERawByteCharSet=^TFLRERawByteCharSet;
+     TFLRERawByteCharSet=set of TFLRERawByteChar;
 
      TFLRERawByteString={$ifdef HAS_TYPE_RAWBYTESTRING}RawByteString{$else}AnsiString{$endif};
 
@@ -216,6 +220,7 @@ type EFLRE=class(Exception);
                 rfLONGEST,
                 rfMULTIMATCH,
                 rfUTF8,
+                rfONLYFASTOPTIMIZATIONS,
                 rfDELIMITERS);
 
      PFLREMatchMode=^TFLREMatchMode;
@@ -241,9 +246,19 @@ type EFLRE=class(Exception);
      TFLREMultiStrings=array of TFLREStrings;
 
      PFLRECharClass=^TFLRECharClass;
-     TFLRECharClass=set of ansichar;
+     TFLRECharClass=set of TFLRERawByteChar;
 
      TPFLRECharClasses=array of PFLRECharClass;
+
+     PFLRECharRange=^TFLRECharRange;
+     TFLRECharRange=record
+      FromChar:TFLRERawByteChar;
+      ToChar:TFLRERawByteChar;
+     end;
+
+     TFLRECharRanges=array of TFLRECharRange;
+
+     TFLRECharClassChars=array of TFLRERawByteChar;
 
      TFLREReplacementCallback=function(const Input:PFLRERawByteChar;const Captures:TFLRECaptures):TFLRERawByteString of object;
 
@@ -507,11 +522,11 @@ type EFLRE=class(Exception);
      TFLREDFAWorkQueues=array[0..1] of TFLREDFAWorkQueue;
 
      PFLRECharPatternBitMasks=^TFLRECharPatternBitMasks;
-     TFLRECharPatternBitMasks=array[ansichar] of longword;
+     TFLRECharPatternBitMasks=array[TFLRERawByteChar] of longword;
 
      TFLREBoyerMooreNext=array of longint;
 
-     TFLREPrefixCharClasses=array[0..FLREMaxPrefixCharClasses-1] of TFLRECharClass;
+     TFLREPrefixCharClasses=array of TFLRECharClass;
 
      PFLREIntegerArray=^TFLREIntegerArray;
      TFLREIntegerArray=array[0..(2147483647 div sizeof(longint))-1] of longint;
@@ -779,7 +794,7 @@ type EFLRE=class(Exception);
        procedure Reset;
 
        procedure FastAddInstructionThread(const State:PFLREDFAState;Instruction:PFLREInstruction); {$ifdef cpu386}register;{$endif}
-       function FastProcessNextState(State:PFLREDFAState;const CurrentChar:ansichar):PFLREDFAState; {$ifdef cpu386}register;{$endif}
+       function FastProcessNextState(State:PFLREDFAState;const CurrentChar:TFLRERawByteChar):PFLREDFAState; {$ifdef cpu386}register;{$endif}
        function SearchMatchFast(const StartPosition,UntilExcludingPosition:longint;out MatchEnd:longint;const UnanchoredStart:longbool):longint; {$ifdef cpu386}stdcall;{$endif}
        function SearchMatchFastReversed(const StartPosition,UntilIncludingPosition:longint;out MatchBegin:longint;const UnanchoredStart:longbool):longint; {$ifdef cpu386}stdcall;{$endif}
 
@@ -881,7 +896,12 @@ type EFLRE=class(Exception);
        FixedStringBoyerMooreSkip:PFLRECharPatternBitMasks;
        FixedStringBoyerMooreNext:TFLREBoyerMooreNext;
 
-       PrefixCharClasses:TFLREPrefixCharClasses;
+       FirstPrefixCharClass:PFLRECharClass;
+       FirstPrefixCharClassSize:longint;
+       FirstPrefixCharClassRepeatedCount:longint;
+       FirstPrefixCharRanges:TFLRECharRanges;
+       CountFirstPrefixCharRanges:longint;
+       FirstPrefixCharClassChars:TFLRECharClassChars;
        CountPrefixCharClasses:longint;
        AveragePrefixCharClassesVariance:longint;
        PrefixPatternBitMasks:PFLRECharPatternBitMasks;
@@ -1277,7 +1297,7 @@ type qword=int64;
 {$ifend}
 {$endif}
 
-type TUTF8Chars=array[ansichar] of byte;
+type TUTF8Chars=array[TFLRERawByteChar] of byte;
 
      TUTF8Bytes=array[byte] of byte;
 
@@ -1501,6 +1521,27 @@ begin
 end;
 {$endif}
 
+procedure MemorySwap(a,b:pointer;Size:longint);
+var Temp:longint;
+begin
+ while Size>=SizeOf(longint) do begin
+  Temp:=longword(a^);
+  longword(a^):=longword(b^);
+  longword(b^):=Temp;
+  inc(PtrUInt(a),SizeOf(longword));
+  inc(PtrUInt(b),SizeOf(longword));
+  dec(Size,SizeOf(longword));
+ end;
+ while Size>=SizeOf(byte) do begin
+  Temp:=byte(a^);
+  byte(a^):=byte(b^);
+  byte(b^):=Temp;
+  inc(PtrUInt(a),SizeOf(byte));
+  inc(PtrUInt(b),SizeOf(byte));
+  dec(Size,SizeOf(byte));
+ end;
+end;
+
 procedure DirectIntroSort(Items:pointer;Left,Right,ElementSize:longint;CompareFunc:TSortCompareFunction);
 type PByteArray=^TByteArray;
      TByteArray=array[0..$3fffffff] of byte;
@@ -1508,132 +1549,122 @@ type PByteArray=^TByteArray;
      TStackItem=record
       Left,Right,Depth:longint;
      end;
-var Depth,i,j,Middle,Size,Parent,Child:longint;
-    Pivot,Temp:pointer;
+var Depth,i,j,Middle,Size,Parent,Child,Pivot,iA,iB,iC:longint;
     StackItem:PStackItem;
     Stack:array[0..31] of TStackItem;
 begin
  if Left<Right then begin
-  GetMem(Temp,ElementSize);
-  GetMem(Pivot,ElementSize);
-  try
-   StackItem:=@Stack[0];
-   StackItem^.Left:=Left;
-   StackItem^.Right:=Right;
-   StackItem^.Depth:=IntLog2((Right-Left)+1) shl 1;
-   inc(StackItem);
-   while ptruint(pointer(StackItem))>ptruint(pointer(@Stack[0])) do begin
-    dec(StackItem);
-    Left:=StackItem^.Left;
-    Right:=StackItem^.Right;
-    Depth:=StackItem^.Depth;
-    if (Right-Left)<16 then begin
-     // Insertion sort
-     for i:=Left+1 to Right do begin
-      j:=i-1;
-      if (j>=Left) and (CompareFunc(pointer(@PByteArray(Items)^[j*ElementSize]),pointer(@PByteArray(Items)^[i*ElementSize]))>0) then begin
-       Move(PByteArray(Items)^[i*ElementSize],Temp^,ElementSize);
-       repeat
-        Move(PByteArray(Items)^[j*ElementSize],PByteArray(Items)^[(j+1)*ElementSize],ElementSize);
-        dec(j);
-       until not ((j>=Left) and (CompareFunc(pointer(@PByteArray(Items)^[j*ElementSize]),Temp)>0));
-       Move(Temp^,PByteArray(Items)^[(j+1)*ElementSize],ElementSize);
-      end;
+  StackItem:=@Stack[0];
+  StackItem^.Left:=Left;
+  StackItem^.Right:=Right;
+  StackItem^.Depth:=IntLog2((Right-Left)+1) shl 1;
+  inc(StackItem);
+  while ptruint(pointer(StackItem))>ptruint(pointer(@Stack[0])) do begin
+   dec(StackItem);
+   Left:=StackItem^.Left;
+   Right:=StackItem^.Right;
+   Depth:=StackItem^.Depth;
+   Size:=(Right-Left)+1;
+   if Size<16 then begin
+    // Insertion sort
+    iA:=Left;
+    iB:=iA+1;
+    while iB<=Right do begin
+     iC:=iB;
+     while (iA>=Left) and
+           (iC>=Left) and
+           (CompareFunc(pointer(@PByteArray(Items)^[iA*ElementSize]),pointer(@PByteArray(Items)^[iC*ElementSize]))>0) do begin
+      MemorySwap(@PByteArray(Items)^[iA*ElementSize],@PByteArray(Items)^[iC*ElementSize],ElementSize);
+      dec(iA);
+      dec(iC);
      end;
-    end else begin
-     if (Depth=0) or (ptruint(pointer(StackItem))>=ptruint(pointer(@Stack[high(Stack)-1]))) then begin
-      // Heap sort
-      Size:=(Right-Left)+1;
-      i:=Size div 2;
-      repeat
-       if i>Left then begin
-        dec(i);
-        Move(PByteArray(Items)^[(Left+i)*ElementSize],Temp^,ElementSize);
+     iA:=iB;
+     inc(iB);
+    end;
+   end else begin
+    if (Depth=0) or (ptruint(pointer(StackItem))>=ptruint(pointer(@Stack[high(Stack)-1]))) then begin
+     // Heap sort
+     i:=Size div 2;
+     repeat
+      if i>0 then begin
+       dec(i);
+      end else begin
+       dec(Size);
+       if Size>0 then begin
+        MemorySwap(@PByteArray(Items)^[(Left+Size)*ElementSize],@PByteArray(Items)^[Left*ElementSize],ElementSize);
        end else begin
-        if Size=0 then begin
-         break;
-        end else begin
-         dec(Size);
-         Move(PByteArray(Items)^[(Left+Size)*ElementSize],Temp^,ElementSize);
-         Move(PByteArray(Items)^[Left*ElementSize],PByteArray(Items)^[(Left+Size)*ElementSize],ElementSize);
-        end;
+        break;
        end;
-       Parent:=i;
-       Child:=(i*2)+1;
-       while Child<Size do begin
-        if ((Child+1)<Size) and (CompareFunc(pointer(@PByteArray(Items)^[((Left+Child)+1)*ElementSize]),pointer(@PByteArray(Items)^[(Left+Child)*ElementSize]))>0) then begin
+      end;
+      Parent:=i;
+      repeat
+       Child:=(Parent*2)+1;
+       if Child<Size then begin
+        if (Child<(Size-1)) and (CompareFunc(pointer(@PByteArray(Items)^[(Left+Child)*ElementSize]),pointer(@PByteArray(Items)^[(Left+Child+1)*ElementSize]))<0) then begin
          inc(Child);
         end;
-        if CompareFunc(pointer(@PByteArray(Items)^[(Left+Child)*ElementSize]),Temp)>0 then begin
-         Move(PByteArray(Items)^[(Left+Child)*ElementSize],PByteArray(Items)^[(Left+Parent)*ElementSize],ElementSize);
+        if CompareFunc(pointer(@PByteArray(Items)^[(Left+Parent)*ElementSize]),pointer(@PByteArray(Items)^[(Left+Child)*ElementSize]))<0 then begin
+         MemorySwap(@PByteArray(Items)^[(Left+Parent)*ElementSize],@PByteArray(Items)^[(Left+Child)*ElementSize],ElementSize);
          Parent:=Child;
-         Child:=(Parent*2)+1;
-        end else begin
-         break;
+         continue;
         end;
        end;
-       Move(Temp^,PByteArray(Items)^[(Left+Parent)*ElementSize],ElementSize);
+       break;
       until false;
-     end else begin
-      // Quick sort width median-of-three optimization
-      Middle:=Left+((Right-Left) shr 1);
-      if (Right-Left)>3 then begin
-       if CompareFunc(pointer(@PByteArray(Items)^[Left*ElementSize]),pointer(@PByteArray(Items)^[Middle*ElementSize]))>0 then begin
-        Move(PByteArray(Items)^[Left*ElementSize],Temp^,ElementSize);
-        Move(PByteArray(Items)^[Middle*ElementSize],PByteArray(Items)^[Left*ElementSize],ElementSize);
-        Move(Temp^,PByteArray(Items)^[Middle*ElementSize],ElementSize);
-       end;
-       if CompareFunc(pointer(@PByteArray(Items)^[Left*ElementSize]),pointer(@PByteArray(Items)^[Right*ElementSize]))>0 then begin
-        Move(PByteArray(Items)^[Left*ElementSize],Temp^,ElementSize);
-        Move(PByteArray(Items)^[Right*ElementSize],PByteArray(Items)^[Left*ElementSize],ElementSize);
-        Move(Temp^,PByteArray(Items)^[Right*ElementSize],ElementSize);
-       end;
-       if CompareFunc(pointer(@PByteArray(Items)^[Middle*ElementSize]),pointer(@PByteArray(Items)^[Right*ElementSize]))>0 then begin
-        Move(PByteArray(Items)^[Middle*ElementSize],Temp^,ElementSize);
-        Move(PByteArray(Items)^[Right*ElementSize],PByteArray(Items)^[Middle*ElementSize],ElementSize);
-        Move(Temp^,PByteArray(Items)^[Right*ElementSize],ElementSize);
-       end;
+     until false;
+    end else begin
+     // Quick sort width median-of-three optimization
+     Middle:=Left+((Right-Left) shr 1);
+     if (Right-Left)>3 then begin
+      if CompareFunc(pointer(@PByteArray(Items)^[Left*ElementSize]),pointer(@PByteArray(Items)^[Middle*ElementSize]))>0 then begin
+       MemorySwap(@PByteArray(Items)^[Left*ElementSize],@PByteArray(Items)^[Middle*ElementSize],ElementSize);
       end;
-      Move(PByteArray(Items)^[Middle*ElementSize],Pivot^,ElementSize);
-      i:=Left;
-      j:=Right;
-      repeat
-       while (i<Right) and (CompareFunc(pointer(@PByteArray(Items)^[i*ElementSize]),Pivot)<0) do begin
-        inc(i);
-       end;
-       while (j>=i) and (CompareFunc(pointer(@PByteArray(Items)^[j*ElementSize]),Pivot)>0) do begin
-        dec(j);
-       end;
-       if i>j then begin
-        break;
-       end else begin
-        if i<>j then begin
-         Move(PByteArray(Items)^[i*ElementSize],Temp^,ElementSize);
-         Move(PByteArray(Items)^[j*ElementSize],PByteArray(Items)^[i*ElementSize],ElementSize);
-         Move(Temp^,PByteArray(Items)^[j*ElementSize],ElementSize);
+      if CompareFunc(pointer(@PByteArray(Items)^[Left*ElementSize]),pointer(@PByteArray(Items)^[Right*ElementSize]))>0 then begin
+       MemorySwap(@PByteArray(Items)^[Left*ElementSize],@PByteArray(Items)^[Right*ElementSize],ElementSize);
+      end;
+      if CompareFunc(pointer(@PByteArray(Items)^[Middle*ElementSize]),pointer(@PByteArray(Items)^[Right*ElementSize]))>0 then begin
+       MemorySwap(@PByteArray(Items)^[Middle*ElementSize],@PByteArray(Items)^[Right*ElementSize],ElementSize);
+      end;
+     end;
+     Pivot:=Middle;
+     i:=Left;
+     j:=Right;
+     repeat
+      while (i<Right) and (CompareFunc(pointer(@PByteArray(Items)^[i*ElementSize]),pointer(@PByteArray(Items)^[Pivot*ElementSize]))<0) do begin
+       inc(i);
+      end;
+      while (j>=i) and (CompareFunc(pointer(@PByteArray(Items)^[j*ElementSize]),pointer(@PByteArray(Items)^[Pivot*ElementSize]))>0) do begin
+       dec(j);
+      end;
+      if i>j then begin
+       break;
+      end else begin
+       if i<>j then begin
+        MemorySwap(@PByteArray(Items)^[i*ElementSize],@PByteArray(Items)^[j*ElementSize],ElementSize);
+        if Pivot=i then begin
+         Pivot:=j;
+        end else if Pivot=j then begin
+         Pivot:=i;
         end;
-        inc(i);
-        dec(j);
        end;
-      until false;
-      if i<Right then begin
-       StackItem^.Left:=i;
-       StackItem^.Right:=Right;
-       StackItem^.Depth:=Depth-1;
-       inc(StackItem);
+       inc(i);
+       dec(j);
       end;
-      if Left<j then begin
-       StackItem^.Left:=Left;
-       StackItem^.Right:=j;
-       StackItem^.Depth:=Depth-1;
-       inc(StackItem);
-      end;
+     until false;
+     if i<Right then begin
+      StackItem^.Left:=i;
+      StackItem^.Right:=Right;
+      StackItem^.Depth:=Depth-1;
+      inc(StackItem);
+     end;
+     if Left<j then begin
+      StackItem^.Left:=Left;
+      StackItem^.Right:=j;
+      StackItem^.Depth:=Depth-1;
+      inc(StackItem);
      end;
     end;
    end;
-  finally
-   FreeMem(Pivot);
-   FreeMem(Temp);
   end;
  end;
 end;
@@ -1661,7 +1692,8 @@ begin
    Left:=StackItem^.Left;
    Right:=StackItem^.Right;
    Depth:=StackItem^.Depth;
-   if (Right-Left)<16 then begin
+   Size:=(Right-Left)+1;
+   if Size<16 then begin
     // Insertion sort
     for i:=Left+1 to Right do begin
      Temp:=PPointers(Items)^[i];
@@ -1677,7 +1709,6 @@ begin
    end else begin
     if (Depth=0) or (ptruint(pointer(StackItem))>=ptruint(pointer(@Stack[high(Stack)-1]))) then begin
      // Heap sort
-     Size:=(Right-Left)+1;
      i:=Size div 2;
      Temp:=nil;
      repeat
@@ -1685,12 +1716,12 @@ begin
        dec(i);
        Temp:=PPointers(Items)^[Left+i];
       end else begin
-       if Size=0 then begin
-        break;
-       end else begin
-        dec(Size);
+       dec(Size);
+       if Size>0 then begin
         Temp:=PPointers(Items)^[Left+Size];
         PPointers(Items)^[Left+Size]:=PPointers(Items)^[Left];
+       end else begin
+        break;
        end;
       end;
       Parent:=i;
@@ -2143,24 +2174,24 @@ begin
 end;
 
 function UTF32CharToUTF8(CharValue:longword):TFLRERawByteString;
-var Data:array[0..{$ifdef FLREStrictUTF8}3{$else}5{$endif}] of ansichar;
+var Data:array[0..{$ifdef FLREStrictUTF8}3{$else}5{$endif}] of TFLRERawByteChar;
     ResultLen:longint;
 begin
  if CharValue=0 then begin
   result:=#0;
  end else begin
   if CharValue<=$7f then begin
-   Data[0]:=ansichar(byte(CharValue));
+   Data[0]:=TFLRERawByteChar(byte(CharValue));
    ResultLen:=1;
   end else if CharValue<=$7ff then begin
-   Data[0]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-   Data[1]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+   Data[1]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=2;
 {$ifdef FLREStrictUTF8}
   end else if CharValue<=$d7ff then begin
-   Data[0]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-   Data[1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-   Data[2]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+   Data[1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+   Data[2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=3;
   end else if CharValue<=$dfff then begin
    Data[0]:=#$ef; // $fffd
@@ -2169,31 +2200,31 @@ begin
    ResultLen:=3;
 {$endif}
   end else if CharValue<=$ffff then begin
-   Data[0]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-   Data[1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-   Data[2]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+   Data[1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+   Data[2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=3;
   end else if CharValue<=$1fffff then begin
-   Data[0]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-   Data[1]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-   Data[2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-   Data[3]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+   Data[1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+   Data[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+   Data[3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=4;
 {$ifndef FLREStrictUTF8}
   end else if CharValue<=$3ffffff then begin
-   Data[0]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-   Data[1]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-   Data[2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-   Data[3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-   Data[4]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+   Data[1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+   Data[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+   Data[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+   Data[4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=5;
   end else if CharValue<=$7fffffff then begin
-   Data[0]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-   Data[1]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-   Data[2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-   Data[3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-   Data[4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-   Data[5]:=ansichar(byte($80 or (CharValue and $3f)));
+   Data[0]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+   Data[1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+   Data[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+   Data[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+   Data[4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+   Data[5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    ResultLen:=6;
 {$endif}
   end else begin
@@ -2578,8 +2609,8 @@ begin
  if (CodeUnit>0) and (CodeUnit<=length(s)) then begin
   State:=ucACCEPT;
   for CodeUnit:=CodeUnit to length(s) do begin
-   Value:=byte(ansichar(s[CodeUnit]));
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2603,8 +2634,8 @@ begin
  if (CodeUnit>=0) and (CodeUnit<Len) then begin
   State:=ucACCEPT;
   for CodeUnit:=CodeUnit to Len-1 do begin
-   Value:=byte(ansichar(s[CodeUnit]));
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2630,8 +2661,8 @@ begin
   StartCodeUnit:=CodeUnit;
   State:=ucACCEPT;
   for CodeUnit:=CodeUnit to Len-1 do begin
-   Value:=byte(ansichar(s[CodeUnit]));
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2643,7 +2674,7 @@ begin
    end;
   end;
   if State<>ucACCEPT then begin
-   result:=byte(ansichar(s[StartCodeUnit]));
+   result:=byte(TFLRERawByteChar(s[StartCodeUnit]));
   end;
  end;
 end;
@@ -2657,9 +2688,9 @@ begin
  if (CodeUnit>0) and (CodeUnit<=Len) then begin
   State:=ucACCEPT;
   while CodeUnit<=Len do begin
-   Value:=byte(ansichar(s[CodeUnit]));
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
    inc(CodeUnit);
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2683,9 +2714,9 @@ begin
  if (CodeUnit>=0) and (CodeUnit<Len) then begin
   State:=ucACCEPT;
   while CodeUnit<Len do begin
-   Value:=byte(ansichar(s[CodeUnit]));
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
    inc(CodeUnit);
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2712,9 +2743,9 @@ begin
   StartCodeUnit:=CodeUnit;
   State:=ucACCEPT;
   while CodeUnit<=Len do begin
-   Value:=byte(ansichar(s[CodeUnit]));
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
    inc(CodeUnit);
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2726,7 +2757,7 @@ begin
    end;
   end;
   if State<>ucACCEPT then begin
-   result:=byte(ansichar(s[StartCodeUnit]));
+   result:=byte(TFLRERawByteChar(s[StartCodeUnit]));
   end;
  end;
 end;
@@ -2741,9 +2772,9 @@ begin
   StartCodeUnit:=CodeUnit;
   State:=ucACCEPT;
   while CodeUnit<=Len do begin
-   Value:=byte(ansichar(s[CodeUnit]));
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
    inc(CodeUnit);
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2755,7 +2786,7 @@ begin
    end;
   end;
   if State<>ucACCEPT then begin
-   result:=byte(ansichar(s[StartCodeUnit]));
+   result:=byte(TFLRERawByteChar(s[StartCodeUnit]));
    CodeUnit:=StartCodeUnit+1;
   end;
  end;
@@ -2769,9 +2800,9 @@ begin
   StartCodeUnit:=CodeUnit;
   State:=ucACCEPT;
   while CodeUnit<Len do begin
-   Value:=byte(ansichar(s[CodeUnit]));
+   Value:=byte(TFLRERawByteChar(s[CodeUnit]));
    inc(CodeUnit);
-   CharClass:=UTF8DFACharClasses[ansichar(Value)];
+   CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
    if State=ucACCEPT then begin
     result:=Value and ($ff shr CharClass);
    end else begin
@@ -2783,7 +2814,7 @@ begin
    end;
   end;
   if State<>ucACCEPT then begin
-   result:=byte(ansichar(s[StartCodeUnit]));
+   result:=byte(TFLRERawByteChar(s[StartCodeUnit]));
    CodeUnit:=StartCodeUnit+1;
   end;
  end;
@@ -2867,9 +2898,9 @@ begin
    State:=ucACCEPT;
    CharValue:=0;
    while CodeUnit<=Len do begin
-    Value:=byte(ansichar(Str[CodeUnit]));
+    Value:=byte(TFLRERawByteChar(Str[CodeUnit]));
     inc(CodeUnit);
-    CharClass:=UTF8DFACharClasses[ansichar(Value)];
+    CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
     if State=ucACCEPT then begin
      CharValue:=Value and ($ff shr CharClass);
     end else begin
@@ -2881,7 +2912,7 @@ begin
     end;
    end;
    if State<>ucACCEPT then begin
-    CharValue:=byte(ansichar(Str[StartCodeUnit]));
+    CharValue:=byte(TFLRERawByteChar(Str[StartCodeUnit]));
     CodeUnit:=StartCodeUnit+1;
    end;
    if CharValue<=$10ffff then begin
@@ -2889,17 +2920,17 @@ begin
     CharValue:=longword(longint(longint(CharValue)+FLREUnicodeUpperCaseDeltaArrayBlockData[FLREUnicodeUpperCaseDeltaArrayIndexBlockData[FLREUnicodeUpperCaseDeltaArrayIndexIndexData[Value shr FLREUnicodeUpperCaseDeltaArrayIndexBlockBits],Value and FLREUnicodeUpperCaseDeltaArrayIndexBlockMask],CharValue and FLREUnicodeUpperCaseDeltaArrayBlockMask]));
    end;
    if CharValue<=$7f then begin
-    Data[ResultLen]:=ansichar(byte(CharValue));
+    Data[ResultLen]:=TFLRERawByteChar(byte(CharValue));
     inc(ResultLen);
    end else if CharValue<=$7ff then begin
-    Data[ResultLen]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,2);
 {$ifdef FLREStrictUTF8}
    end else if CharValue<=$d7ff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$dfff then begin
     Data[ResultLen]:=#$ef; // $fffd
@@ -2908,31 +2939,31 @@ begin
     inc(ResultLen,3);
 {$endif}
    end else if CharValue<=$ffff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$1fffff then begin
-    Data[ResultLen]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,4);
 {$ifndef FLREStrictUTF8}
    end else if CharValue<=$3ffffff then begin
-    Data[ResultLen]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,5);
    end else if CharValue<=$7fffffff then begin
-    Data[ResultLen]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+5]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,6);
 {$endif}
    end else begin
@@ -2963,9 +2994,9 @@ begin
    State:=ucACCEPT;
    CharValue:=0;
    while CodeUnit<=Len do begin
-    Value:=byte(ansichar(Str[CodeUnit]));
+    Value:=byte(TFLRERawByteChar(Str[CodeUnit]));
     inc(CodeUnit);
-    CharClass:=UTF8DFACharClasses[ansichar(Value)];
+    CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
     if State=ucACCEPT then begin
      CharValue:=Value and ($ff shr CharClass);
     end else begin
@@ -2977,7 +3008,7 @@ begin
     end;
    end;
    if State<>ucACCEPT then begin
-    CharValue:=byte(ansichar(Str[StartCodeUnit]));
+    CharValue:=byte(TFLRERawByteChar(Str[StartCodeUnit]));
     CodeUnit:=StartCodeUnit+1;
    end;
    if CharValue<=$10ffff then begin
@@ -2985,17 +3016,17 @@ begin
     CharValue:=longword(longint(longint(CharValue)+FLREUnicodeLowerCaseDeltaArrayBlockData[FLREUnicodeLowerCaseDeltaArrayIndexBlockData[FLREUnicodeLowerCaseDeltaArrayIndexIndexData[Value shr FLREUnicodeLowerCaseDeltaArrayIndexBlockBits],Value and FLREUnicodeLowerCaseDeltaArrayIndexBlockMask],CharValue and FLREUnicodeLowerCaseDeltaArrayBlockMask]));
    end;
    if CharValue<=$7f then begin
-    Data[ResultLen]:=ansichar(byte(CharValue));
+    Data[ResultLen]:=TFLRERawByteChar(byte(CharValue));
     inc(ResultLen);
    end else if CharValue<=$7ff then begin
-    Data[ResultLen]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,2);
 {$ifdef FLREStrictUTF8}
    end else if CharValue<=$d7ff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$dfff then begin
     Data[ResultLen]:=#$ef; // $fffd
@@ -3004,31 +3035,31 @@ begin
     inc(ResultLen,3);
 {$endif}
    end else if CharValue<=$ffff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$1fffff then begin
-    Data[ResultLen]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,4);
 {$ifndef FLREStrictUTF8}
    end else if CharValue<=$3ffffff then begin
-    Data[ResultLen]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,5);
    end else if CharValue<=$7fffffff then begin
-    Data[ResultLen]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+5]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,6);
 {$endif}
    end else begin
@@ -3083,9 +3114,9 @@ begin
    State:=ucACCEPT;
    CharValue:=0;
    while CodeUnit<=Len do begin
-    Value:=byte(ansichar(Str[CodeUnit]));
+    Value:=byte(TFLRERawByteChar(Str[CodeUnit]));
     inc(CodeUnit);
-    CharClass:=UTF8DFACharClasses[ansichar(Value)];
+    CharClass:=UTF8DFACharClasses[TFLRERawByteChar(Value)];
     if State=ucACCEPT then begin
      CharValue:=Value and ($ff shr CharClass);
     end else begin
@@ -3097,21 +3128,21 @@ begin
     end;
    end;
    if State<>ucACCEPT then begin
-    CharValue:=byte(ansichar(Str[StartCodeUnit]));
+    CharValue:=byte(TFLRERawByteChar(Str[StartCodeUnit]));
     CodeUnit:=StartCodeUnit+1;
    end;
    if CharValue<=$7f then begin
-    Data[ResultLen]:=ansichar(byte(CharValue));
+    Data[ResultLen]:=TFLRERawByteChar(byte(CharValue));
     inc(ResultLen);
    end else if CharValue<=$7ff then begin
-    Data[ResultLen]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,2);
 {$ifdef FLREStrictUTF8}
    end else if CharValue<=$d7ff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$dfff then begin
     Data[ResultLen]:=#$ef; // $fffd
@@ -3120,31 +3151,31 @@ begin
     inc(ResultLen,3);
 {$endif}
    end else if CharValue<=$ffff then begin
-    Data[ResultLen]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,3);
    end else if CharValue<=$1fffff then begin
-    Data[ResultLen]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,4);
 {$ifndef FLREStrictUTF8}
    end else if CharValue<=$3ffffff then begin
-    Data[ResultLen]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,5);            
    end else if CharValue<=$7fffffff then begin
-    Data[ResultLen]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-    Data[ResultLen+1]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-    Data[ResultLen+2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    Data[ResultLen+3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    Data[ResultLen+4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    Data[ResultLen+5]:=ansichar(byte($80 or (CharValue and $3f)));
+    Data[ResultLen]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+    Data[ResultLen+1]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+    Data[ResultLen+2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    Data[ResultLen+3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    Data[ResultLen+4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    Data[ResultLen+5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     inc(ResultLen,6);
 {$endif}
    end else begin
@@ -3166,7 +3197,7 @@ begin
  end else begin
   result:='';
   for CodeUnit:=1 to length(Str) do begin
-   result:=result+UTF32CharToUTF8(byte(ansichar(Str[CodeUnit])));
+   result:=result+UTF32CharToUTF8(byte(TFLRERawByteChar(Str[CodeUnit])));
   end;
  end;
 end;
@@ -3408,7 +3439,1799 @@ end;
 {$endif}
 {$endif}
 
-function PtrPosChar(const Pattern:ansichar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+{$ifdef cpux86_64}
+
+// Thanks to Jeffrey Lim
+
+function PtrPosCharSearch(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+ movq xmm0,rsi
+ pxor xmm1,xmm1
+ pshufb xmm0,xmm1
+ and rdi,-32
+ and ecx,31
+ movdqa xmm1,[rdi]
+ movdqa xmm2,[rdi+16]
+ pcmpeqb xmm1,xmm0
+ pcmpeqb xmm2,xmm0
+ pmovmskb eax,xmm1
+ pmovmskb r10d,xmm2
+ shl r10d,16
+ or eax,r10d
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm1,[rdi+rdx]
+ movdqa xmm2,[rdi+rdx+16]
+ pcmpeqb xmm1,xmm0
+ pcmpeqb xmm2,xmm0
+ por xmm2,xmm1
+ pmovmskb eax,xmm2
+ test eax,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ pmovmskb r10d,xmm1
+ shl eax,16
+ or eax,r10d
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosChar(const SearchChar:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSearch(@Text[Offset],byte(TFLRERawByteChar(SearchChar)),@Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf2Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ pxor xmm2,xmm2
+ movdqa xmm3,[XMM1Constant]
+ pshufb xmm0,xmm2
+ pshufb xmm1,xmm3
+
+ mov ecx,edi
+ and rdi,-32
+ and ecx,31
+ movdqa xmm2,[rdi]
+ movdqa xmm3,[rdi]
+ movdqa xmm4,[rdi+16]
+ movdqa xmm5,[rdi+16]
+ pcmpeqb xmm2,xmm0
+ pcmpeqb xmm3,xmm1
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+ por xmm3,xmm2
+ por xmm5,xmm4
+ pmovmskb eax,xmm3
+ pmovmskb r10d,xmm5
+ shl r10d,16
+ or eax,r10d
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm2,[rdi+rdx]
+ movdqa xmm3,[rdi+rdx]
+ movdqa xmm4,[rdi+rdx+16]
+ movdqa xmm5,[rdi+rdx+16]
+ pcmpeqb xmm2,xmm0
+ pcmpeqb xmm3,xmm1
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+ por xmm3,xmm2
+ por xmm5,xmm4
+ por xmm5,xmm3
+ pmovmskb eax,xmm5
+ test eax,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ pmovmskb r10d,xmm3
+ shl eax,16
+ or eax,r10d
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf2(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf2Search(@Text[Offset],(TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),@Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf3Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+
+ and rdi,-32
+ and ecx,31
+
+ pxor xmm9,xmm9
+ movdqa xmm10,[XMM1Constant]
+ movdqa xmm11,[XMM2Constant]
+
+ movdqa xmm3,[rdi]
+ movdqa xmm4,[rdi]
+ movdqa xmm5,[rdi]
+
+ pshufb xmm0,xmm9
+ pshufb xmm1,xmm10
+ pshufb xmm2,xmm11
+
+ movdqa xmm6,[rdi+16]
+ movdqa xmm7,[rdi+16]
+ movdqa xmm8,[rdi+16]
+
+ pcmpeqb xmm3,xmm0
+ pcmpeqb xmm4,xmm1
+ pcmpeqb xmm5,xmm2
+ pcmpeqb xmm6,xmm0
+ pcmpeqb xmm7,xmm1
+ pcmpeqb xmm8,xmm2
+ por xmm4,xmm3
+ por xmm7,xmm6
+ por xmm5,xmm4
+ por xmm8,xmm7
+ pmovmskb eax,xmm5
+ pmovmskb r10d,xmm8
+ shl r10d,16
+ or eax,r10d
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm3,[rdi+rdx]
+ movdqa xmm4,[rdi+rdx]
+ movdqa xmm5,[rdi+rdx]
+ movdqa xmm6,[rdi+rdx+16]
+ movdqa xmm7,[rdi+rdx+16]
+ movdqa xmm8,[rdi+rdx+16]
+ pcmpeqb xmm3,xmm0
+ pcmpeqb xmm4,xmm1
+ pcmpeqb xmm5,xmm2
+ pcmpeqb xmm6,xmm0
+ pcmpeqb xmm7,xmm1
+ pcmpeqb xmm8,xmm2
+ por xmm4,xmm3
+ por xmm7,xmm6
+ por xmm5,xmm4
+ por xmm8,xmm7
+ por xmm8,xmm5
+ pmovmskb eax,xmm8
+ test eax,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ pmovmskb r10d,xmm5
+ shl eax,16
+ or eax,r10d
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf3(const SearchChar0,SearchChar1,SearchChar2:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf3Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf4Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+
+ and rdi,-32
+ and ecx,31
+
+ pxor xmm12,xmm12
+ movdqa xmm13,[XMM1Constant]
+ movdqa xmm14,[XMM2Constant]
+ movdqa xmm15,[XMM3Constant]
+
+ movdqa xmm4,[rdi]
+ movdqa xmm5,[rdi]
+ movdqa xmm6,[rdi]
+ movdqa xmm7,[rdi]
+
+ pshufb xmm0,xmm12
+ pshufb xmm1,xmm13
+ pshufb xmm2,xmm14
+ pshufb xmm3,xmm15
+
+ movdqa xmm8,[rdi+16]
+ movdqa xmm9,[rdi+16]
+ movdqa xmm10,[rdi+16]
+ movdqa xmm11,[rdi+16]
+
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+ pcmpeqb xmm6,xmm2
+ pcmpeqb xmm7,xmm3
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ por xmm5,xmm4
+ por xmm7,xmm6
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm7,xmm5
+ por xmm11,xmm9
+ pmovmskb eax,xmm7
+ pmovmskb r10d,xmm11
+ shl r10d,16
+ or eax,r10d
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm4,[rdi+rdx]
+ movdqa xmm5,[rdi+rdx]
+ movdqa xmm6,[rdi+rdx]
+ movdqa xmm7,[rdi+rdx]
+ movdqa xmm8,[rdi+rdx+16]
+ movdqa xmm9,[rdi+rdx+16]
+ movdqa xmm10,[rdi+rdx+16]
+ movdqa xmm11,[rdi+rdx+16]
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+ pcmpeqb xmm6,xmm2
+ pcmpeqb xmm7,xmm3
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ por xmm5,xmm4
+ por xmm7,xmm6
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm7,xmm5
+ por xmm11,xmm9
+ por xmm11,xmm7
+ pmovmskb eax,xmm11
+ test eax,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ pmovmskb r10d,xmm7
+ shl eax,16
+ or eax,r10d
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf4(const SearchChar0,SearchChar1,SearchChar2,SearchChar3:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf4Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar3))) shl 24) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf5Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+
+ and rdi,-16
+ and ecx,15
+
+ pxor xmm11,xmm11
+ movdqa xmm12,[XMM1Constant]
+ movdqa xmm13,[XMM2Constant]
+ movdqa xmm14,[XMM3Constant]
+ movdqa xmm15,[XMM4Constant]
+
+ pshufb xmm0,xmm11
+ pshufb xmm1,xmm12
+ pshufb xmm2,xmm13
+ pshufb xmm3,xmm14
+ pshufb xmm4,xmm15
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm9,xmm12
+ por xmm9,xmm11
+
+ pmovmskb eax,xmm9
+
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm9,xmm12
+ por xmm9,xmm11
+
+ pmovmskb eax,xmm9
+ test eax,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf5(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf5Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar4))) shl 32) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar3))) shl 24) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf6Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+      XMM5Constant:array[0..1] of TFLREQWord=(TFLREQWord($0505050505050505),TFLREQWord($0505050505050505));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+ movq xmm5,rsi
+
+ and rdi,-16
+ and ecx,15
+
+ pxor xmm10,xmm10
+ movdqa xmm11,[XMM1Constant]
+ movdqa xmm12,[XMM2Constant]
+ movdqa xmm13,[XMM3Constant]
+ movdqa xmm14,[XMM4Constant]
+ movdqa xmm15,[XMM5Constant]
+
+ pshufb xmm0,xmm10
+ pshufb xmm1,xmm11
+ pshufb xmm2,xmm12
+ pshufb xmm3,xmm13
+ pshufb xmm4,xmm14
+ pshufb xmm5,xmm15
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+ movdqa xmm13,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm11,xmm9
+ por xmm13,xmm11
+
+ pmovmskb eax,xmm13
+
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+ movdqa xmm13,[rdi+rdx]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm11,xmm9
+ por xmm13,xmm11
+
+ pmovmskb eax,xmm13
+ test eax,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf6(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf6Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar5))) shl 40) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar4))) shl 32) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar3))) shl 24) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf7Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+      XMM5Constant:array[0..1] of TFLREQWord=(TFLREQWord($0505050505050505),TFLREQWord($0505050505050505));
+      XMM6Constant:array[0..1] of TFLREQWord=(TFLREQWord($0606060606060606),TFLREQWord($0606060606060606));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+ movq xmm5,rsi
+ movq xmm6,rsi
+
+ and rdi,-16
+ and ecx,15
+
+ pxor xmm9,xmm9
+ movdqa xmm10,[XMM1Constant]
+ movdqa xmm11,[XMM2Constant]
+ movdqa xmm12,[XMM3Constant]
+ movdqa xmm13,[XMM4Constant]
+ movdqa xmm14,[XMM5Constant]
+ movdqa xmm15,[XMM6Constant]
+
+ pshufb xmm0,xmm9
+ pshufb xmm1,xmm10
+ pshufb xmm2,xmm11
+ pshufb xmm3,xmm12
+ pshufb xmm4,xmm13
+ pshufb xmm5,xmm14
+ pshufb xmm6,xmm15
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+ movdqa xmm13,[rdi]
+ movdqa xmm14,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm9,xmm14
+ por xmm13,xmm11
+ por xmm13,xmm9
+
+ pmovmskb eax,xmm13
+
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+ movdqa xmm13,[rdi+rdx]
+ movdqa xmm14,[rdi+rdx]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm9,xmm14
+ por xmm13,xmm11
+ por xmm13,xmm9
+
+ pmovmskb eax,xmm13
+ test eax,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf7(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf7Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar6))) shl 48) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar5))) shl 40) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar4))) shl 32) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar3))) shl 24) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf8Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+      XMM5Constant:array[0..1] of TFLREQWord=(TFLREQWord($0505050505050505),TFLREQWord($0505050505050505));
+      XMM6Constant:array[0..1] of TFLREQWord=(TFLREQWord($0606060606060606),TFLREQWord($0606060606060606));
+      XMM7Constant:array[0..1] of TFLREQWord=(TFLREQWord($0707070707070707),TFLREQWord($0707070707070707));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ mov ecx,edi
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+ movq xmm5,rsi
+ movq xmm6,rsi
+ movq xmm7,rsi
+
+ and rdi,-16
+ and ecx,15
+
+ pxor xmm8,xmm8
+ movdqa xmm9,[XMM1Constant]
+ movdqa xmm10,[XMM2Constant]
+ movdqa xmm11,[XMM3Constant]
+ movdqa xmm12,[XMM4Constant]
+ movdqa xmm13,[XMM5Constant]
+ movdqa xmm14,[XMM6Constant]
+ movdqa xmm15,[XMM7Constant]
+
+ pshufb xmm0,xmm8
+ pshufb xmm1,xmm9
+ pshufb xmm2,xmm10
+ pshufb xmm3,xmm11
+ pshufb xmm4,xmm12
+ pshufb xmm5,xmm13
+ pshufb xmm6,xmm14
+ pshufb xmm7,xmm15
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+ movdqa xmm13,[rdi]
+ movdqa xmm14,[rdi]
+ movdqa xmm15,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+ pcmpeqb xmm15,xmm7
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm15,xmm14
+ por xmm11,xmm9
+ por xmm15,xmm13
+ por xmm15,xmm11
+
+ pmovmskb eax,xmm15
+
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+ movdqa xmm13,[rdi+rdx]
+ movdqa xmm14,[rdi+rdx]
+ movdqa xmm15,[rdi+rdx]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+ pcmpeqb xmm15,xmm7
+
+ por xmm9,xmm8
+ por xmm11,xmm10
+ por xmm13,xmm12
+ por xmm15,xmm14
+ por xmm11,xmm9
+ por xmm15,xmm13
+ por xmm15,xmm11
+
+ pmovmskb eax,xmm15
+ test eax,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf8(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6,SearchChar7:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+begin
+ result:=PtrPosCharSetOf8Search(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar7))) shl 56) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar6))) shl 48) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar5))) shl 40) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar4))) shl 32) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar3))) shl 24) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar2))) shl 16) or
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharPairSearch(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ pxor xmm2,xmm2
+ movdqa xmm3,[XMM1Constant]
+ pshufb xmm0,xmm2
+ pshufb xmm1,xmm3
+
+ mov ecx,edi
+ and rdi,-32
+ and ecx,31
+ movdqa xmm2,[rdi]
+ movdqa xmm3,[rdi]
+ movdqa xmm4,[rdi+16]
+ movdqa xmm5,[rdi+16]
+ pcmpeqb xmm2,xmm0
+ pcmpeqb xmm3,xmm1
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+
+ pmovmskb r8d,xmm2
+ pmovmskb r9d,xmm3
+ pmovmskb r10d,xmm4
+ pmovmskb r11d,xmm5
+
+ shl r10,17
+ shl r11d,16
+ add ecx,1 // inc ecx
+ or r9d,r11d
+ lea rax,[r10+r8*2]
+
+ and r9d,eax
+ shr r9,cl
+ bsf eax,r9d
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ sub rax,1 // dec rax
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm2,[rdi+rdx]
+ movdqa xmm3,[rdi+rdx]
+ movdqa xmm4,[rdi+rdx+16]
+ movdqa xmm5,[rdi+rdx+16]
+
+ shr rax,32
+
+ pcmpeqb xmm2,xmm0
+ pcmpeqb xmm3,xmm1
+ pcmpeqb xmm4,xmm0
+ pcmpeqb xmm5,xmm1
+
+ pmovmskb r8d,xmm2
+ pmovmskb r9d,xmm3
+ pmovmskb r10d,xmm4
+ pmovmskb r11d,xmm5
+
+ lea rax,[rax+r8*2]
+ shl r10,17
+ shl r11d,16
+ add rax,r10
+ or r9d,r11d
+
+ and r9d,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,r9d
+ sub rdx,1 // dec rdx
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharPair(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharPairSearch(@Text[Offset],(TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),@Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf2Of2Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+
+ mov ecx,edi
+ pxor xmm4,xmm4
+ movdqa xmm5,[XMM1Constant]
+ movdqa xmm6,[XMM2Constant]
+ movdqa xmm7,[XMM3Constant]
+
+ and rdi,-32
+ and ecx,31
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+
+ pshufb xmm0,xmm4
+ pshufb xmm1,xmm5
+ pshufb xmm2,xmm6
+ pshufb xmm3,xmm7
+
+ movdqa xmm12,[rdi+16]
+ movdqa xmm13,[rdi+16]
+ movdqa xmm14,[rdi+16]
+ movdqa xmm15,[rdi+16]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm0
+ pcmpeqb xmm13,xmm1
+ pcmpeqb xmm14,xmm2
+ pcmpeqb xmm15,xmm3
+
+ por xmm8,xmm9
+ por xmm10,xmm11
+ por xmm12,xmm13
+ por xmm14,xmm15
+
+ pmovmskb r8d,xmm8
+ pmovmskb r9d,xmm10
+ pmovmskb r10d,xmm12
+ pmovmskb r11d,xmm14
+
+ shl r10,17
+ shl r11d,16
+ add ecx,1 // inc ecx
+ or r9d,r11d
+ lea rax,[r10+r8*2]
+
+ and r9d,eax
+ shr r9,cl
+ bsf eax,r9d
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ sub rax,1 // dec rax
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx+16]
+ movdqa xmm13,[rdi+rdx+16]
+ movdqa xmm14,[rdi+rdx+16]
+ movdqa xmm15,[rdi+rdx+16]
+
+ shr rax,32
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm0
+ pcmpeqb xmm13,xmm1
+ pcmpeqb xmm14,xmm2
+ pcmpeqb xmm15,xmm3
+
+ por xmm8,xmm9
+ por xmm10,xmm11
+ por xmm12,xmm13
+ por xmm14,xmm15
+
+ pmovmskb r8d,xmm8
+ pmovmskb r9d,xmm10
+ pmovmskb r10d,xmm12
+ pmovmskb r11d,xmm14
+
+ lea rax,[rax+r8*2]
+ shl r10,17
+ shl r11d,16
+ add rax,r10
+ or r9d,r11d
+
+ and r9d,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,r9d
+ sub rdx,1 // dec rdx
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf2Of2(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharSetOf2Of2Search(@Text[Offset],
+                                   (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                                   TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                                   @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf2Of3Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+      XMM5Constant:array[0..1] of TFLREQWord=(TFLREQWord($0505050505050505),TFLREQWord($0505050505050505));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+ movq xmm5,rsi
+
+ mov ecx,edi
+ pxor xmm6,xmm6
+ movdqa xmm7,[XMM1Constant]
+ movdqa xmm8,[XMM2Constant]
+ movdqa xmm9,[XMM3Constant]
+ movdqa xmm10,[XMM4Constant]
+ movdqa xmm11,[XMM5Constant]
+
+ and rdi,-16
+ and ecx,15
+
+ pshufb xmm0,xmm6
+ pshufb xmm1,xmm7
+ pshufb xmm2,xmm8
+ pshufb xmm3,xmm9
+ pshufb xmm4,xmm10
+ pshufb xmm5,xmm11
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+ movdqa xmm13,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+
+ por xmm8,xmm9
+ por xmm11,xmm12
+ por xmm8,xmm10
+ por xmm11,xmm13
+
+ pmovmskb r8d,xmm8
+ pmovmskb r10d,xmm11
+
+ add ecx,1 // inc ecx
+ lea rax,[r8+r8]
+
+ and r10d,eax
+ shr r10d,cl
+ bsf eax,r10d
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ sub rax,1 // dec rax
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+ movdqa xmm13,[rdi+rdx]
+
+ shr rax,16
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+
+ por xmm8,xmm9
+ por xmm11,xmm12
+ por xmm8,xmm10
+ por xmm11,xmm13
+
+ pmovmskb r8d,xmm8
+ pmovmskb r10d,xmm11
+
+ lea rax,[rax+r8*2]
+
+ and r10d,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,r10d
+ sub rdx,1 // dec rdx
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf2Of3(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharSetOf2Of3Search(@Text[Offset],
+                                   (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                                   TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                                   @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharSetOf2Of4Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM4Constant:array[0..1] of TFLREQWord=(TFLREQWord($0404040404040404),TFLREQWord($0404040404040404));
+      XMM5Constant:array[0..1] of TFLREQWord=(TFLREQWord($0505050505050505),TFLREQWord($0505050505050505));
+      XMM6Constant:array[0..1] of TFLREQWord=(TFLREQWord($0606060606060606),TFLREQWord($0606060606060606));
+      XMM7Constant:array[0..1] of TFLREQWord=(TFLREQWord($0707070707070707),TFLREQWord($0707070707070707));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+ movq xmm4,rsi
+ movq xmm5,rsi
+ movq xmm6,rsi
+ movq xmm7,rsi
+
+ mov ecx,edi
+ pxor xmm8,xmm8
+ movdqa xmm9,[XMM1Constant]
+ movdqa xmm10,[XMM2Constant]
+ movdqa xmm11,[XMM3Constant]
+ movdqa xmm12,[XMM4Constant]
+ movdqa xmm13,[XMM5Constant]
+ movdqa xmm14,[XMM6Constant]
+ movdqa xmm15,[XMM7Constant]
+
+ and rdi,-16
+ and ecx,15
+
+ pshufb xmm0,xmm8
+ pshufb xmm1,xmm9
+ pshufb xmm2,xmm10
+ pshufb xmm3,xmm11
+ pshufb xmm4,xmm12
+ pshufb xmm5,xmm13
+ pshufb xmm6,xmm14
+ pshufb xmm7,xmm15
+
+ movdqa xmm8,[rdi]
+ movdqa xmm9,[rdi]
+ movdqa xmm10,[rdi]
+ movdqa xmm11,[rdi]
+ movdqa xmm12,[rdi]
+ movdqa xmm13,[rdi]
+ movdqa xmm14,[rdi]
+ movdqa xmm15,[rdi]
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+ pcmpeqb xmm15,xmm7
+
+ por xmm8,xmm9
+ por xmm10,xmm11
+ por xmm12,xmm13
+ por xmm14,xmm15
+ por xmm8,xmm10
+ por xmm12,xmm14
+
+ pmovmskb r8d,xmm8
+ pmovmskb r10d,xmm12
+
+ add ecx,1 // inc ecx
+ lea rax,[r8+r8]
+
+ and r10d,eax
+ shr r10d,cl
+ bsf eax,r10d
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ sub rax,1 // dec rax
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,16
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm8,[rdi+rdx]
+ movdqa xmm9,[rdi+rdx]
+ movdqa xmm10,[rdi+rdx]
+ movdqa xmm11,[rdi+rdx]
+ movdqa xmm12,[rdi+rdx]
+ movdqa xmm13,[rdi+rdx]
+ movdqa xmm14,[rdi+rdx]
+ movdqa xmm15,[rdi+rdx]
+
+ shr rax,16
+
+ pcmpeqb xmm8,xmm0
+ pcmpeqb xmm9,xmm1
+ pcmpeqb xmm10,xmm2
+ pcmpeqb xmm11,xmm3
+ pcmpeqb xmm12,xmm4
+ pcmpeqb xmm13,xmm5
+ pcmpeqb xmm14,xmm6
+ pcmpeqb xmm15,xmm7
+
+ por xmm8,xmm9
+ por xmm10,xmm11
+ por xmm12,xmm13
+ por xmm14,xmm15
+ por xmm8,xmm10
+ por xmm12,xmm14
+
+ pmovmskb r8d,xmm8
+ pmovmskb r10d,xmm12
+
+ lea rax,[rax+r8*2]
+
+ and r10d,eax
+ jne @Found
+ add rdi,16
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,r10d
+ sub rdx,1 // dec rdx
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharSetOf2Of4(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharSetOf2Of4Search(@Text[Offset],
+                                   (TFLREQWord(byte(TFLRERawByteChar(SearchChar1))) shl 8) or
+                                   TFLREQWord(byte(TFLRERawByteChar(SearchChar0))),
+                                   @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharRangeSearch(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM126Constant:array[0..1] of TFLREQWord=(TFLREQWord($7e7e7e7e7e7e7e7e),TFLREQWord($7e7e7e7e7e7e7e7e));
+      XMM127Constant:array[0..1] of TFLREQWord=(TFLREQWord($7f7f7f7f7f7f7f7f),TFLREQWord($7f7f7f7f7f7f7f7f));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+
+ mov ecx,edi
+ pxor xmm4,xmm4
+ movdqa xmm5,[XMM1Constant]
+ movdqa xmm6,[XMM126Constant]
+ movdqa xmm7,[XMM127Constant]
+
+ and rdi,-32
+ and ecx,31
+
+ pshufb xmm0,xmm4
+ pshufb xmm1,xmm5
+ psubb xmm6,xmm1
+ psubb xmm7,xmm1
+ paddb xmm6,xmm0
+
+ movdqa xmm2,[rdi]
+ movdqa xmm3,[rdi+16]
+ paddb xmm2,xmm7
+ paddb xmm3,xmm7
+ pcmpgtb xmm2,xmm6
+ pcmpgtb xmm3,xmm6
+ pmovmskb eax,xmm2
+ pmovmskb r10d,xmm3
+ shl r10d,16
+ or eax,r10d
+ shr eax,cl
+ bsf eax,eax
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm2,[rdi+rdx]
+ movdqa xmm3,[rdi+rdx+16]
+ paddb xmm2,xmm7
+ paddb xmm3,xmm7
+ pcmpgtb xmm2,xmm6
+ pcmpgtb xmm3,xmm6
+ por xmm3,xmm2
+ pmovmskb eax,xmm3
+ test eax,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ pmovmskb r10d,xmm2
+ shl eax,16
+ or eax,r10d
+ bsf eax,eax
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharRange(const SearchFromChar,SearchToChar:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharRangeSearch(@Text[Offset],
+                               (TFLREQWord(byte(TFLRERawByteChar(SearchToChar))) shl 8) or
+                               TFLREQWord(byte(TFLRERawByteChar(SearchFromChar))),
+                               @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+function PtrPosCharRangeOf2Search(const p:pointer;const v:TFLREQWord;const pEnd:pointer):ptrint; assembler; register;
+const XMM1Constant:array[0..1] of TFLREQWord=(TFLREQWord($0101010101010101),TFLREQWord($0101010101010101));
+      XMM2Constant:array[0..1] of TFLREQWord=(TFLREQWord($0202020202020202),TFLREQWord($0202020202020202));
+      XMM3Constant:array[0..1] of TFLREQWord=(TFLREQWord($0303030303030303),TFLREQWord($0303030303030303));
+      XMM126Constant:array[0..1] of TFLREQWord=(TFLREQWord($7e7e7e7e7e7e7e7e),TFLREQWord($7e7e7e7e7e7e7e7e));
+      XMM127Constant:array[0..1] of TFLREQWord=(TFLREQWord($7f7f7f7f7f7f7f7f),TFLREQWord($7f7f7f7f7f7f7f7f));
+asm
+{$ifdef Windows}
+ // Win64 ABI to System-V ABI wrapper
+ mov rdi,rcx
+ mov rsi,rdx
+ mov rdx,r8
+//mov rcx,r9
+{$endif}
+
+ movq xmm0,rsi
+ movq xmm1,rsi
+ movq xmm2,rsi
+ movq xmm3,rsi
+
+ mov ecx,edi
+ pxor xmm8,xmm8
+ movdqa xmm9,[XMM1Constant]
+ movdqa xmm10,[XMM2Constant]
+ movdqa xmm11,[XMM3Constant]
+ movdqa xmm12,[XMM126Constant]
+ movdqa xmm13,[XMM127Constant]
+ movdqa xmm14,[XMM126Constant]
+ movdqa xmm15,[XMM127Constant]
+
+ and rdi,-32
+ and ecx,31
+
+ pshufb xmm0,xmm8
+ pshufb xmm1,xmm9
+ pshufb xmm2,xmm10
+ pshufb xmm3,xmm11
+
+ psubb xmm12,xmm1
+ psubb xmm13,xmm1
+ psubb xmm14,xmm3
+ psubb xmm15,xmm3
+ paddb xmm12,xmm0
+ paddb xmm14,xmm2
+
+ movdqa xmm4,[rdi]
+ movdqa xmm5,[rdi]
+ movdqa xmm6,[rdi+16]
+ movdqa xmm7,[rdi+16]
+ paddb xmm4,xmm13
+ paddb xmm5,xmm15
+ paddb xmm6,xmm13
+ paddb xmm7,xmm15
+ pcmpgtb xmm4,xmm12
+ pcmpgtb xmm5,xmm14
+ pcmpgtb xmm6,xmm12
+ pcmpgtb xmm7,xmm14
+
+ pmovmskb r8d,xmm4
+ pmovmskb r9d,xmm5
+ pmovmskb r10d,xmm5
+ pmovmskb r11d,xmm5
+
+ shl r10,17
+ shl r11d,16
+ add ecx,1 // inc ecx
+ or r9d,r11d
+ lea rax,[r10+r8*2]
+
+ and r9d,eax
+ shr r9,cl
+ bsf eax,r9d
+ jz @DoMainLoop
+ add rdi,rcx
+ add rax,rdi
+ cmp rax,rdx
+ jae @Fail
+ sub rax,1 // dec rax
+ jmp @Done
+
+@DoMainLoop:
+ add rdi,32
+ sub rdi,rdx
+ jnc @Fail
+
+@MainLoop:
+ movdqa xmm4,[rdi+rdx]
+ movdqa xmm5,[rdi+rdx]
+ movdqa xmm6,[rdi+rdx+16]
+ movdqa xmm7,[rdi+rdx+16]
+
+ shr rax,32
+
+ paddb xmm4,xmm13
+ paddb xmm5,xmm15
+ paddb xmm6,xmm13
+ paddb xmm7,xmm15
+ pcmpgtb xmm4,xmm12
+ pcmpgtb xmm5,xmm14
+ pcmpgtb xmm6,xmm12
+ pcmpgtb xmm7,xmm14
+
+ pmovmskb r8d,xmm4
+ pmovmskb r9d,xmm5
+ pmovmskb r10d,xmm5
+ pmovmskb r11d,xmm5
+
+ lea rax,[rax+r8*2]
+ shl r10,17
+ shl r11d,16
+ add rax,r10
+ or r9d,r11d
+
+ and r9d,eax
+ jne @Found
+ add rdi,32
+ jnc @MainLoop
+
+@Fail:
+ xor eax,eax
+ jmp @Done
+
+@Found:
+ bsf eax,r9d
+ sub rdx,1 // dec rdx
+ add rax,rdi
+ jc @Fail
+ add rax,rdx
+@Done:
+end;
+
+function PtrPosCharRangeOf2(const SearchFromChar0,SearchToChar0,SearchFromChar1,SearchToChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ result:=PtrPosCharRangeOf2Search(@Text[Offset],
+                                  (TFLREQWord(byte(TFLRERawByteChar(SearchToChar1))) shl 24) or
+                                  (TFLREQWord(byte(TFLRERawByteChar(SearchFromChar1))) shl 16) or
+                                  (TFLREQWord(byte(TFLRERawByteChar(SearchToChar0))) shl 8) or
+                                  TFLREQWord(byte(TFLRERawByteChar(SearchFromChar0))),
+                                  @Text[TextLength]);
+ if result=0 then begin
+  result:=-1;
+ end else begin
+  dec(result,ptrint(pointer(@Text[Offset])));
+ end;
+end;
+
+{$else}
+function PtrPosChar(const SearchChar:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
 type pptruint=^ptruint;
 const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
       MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
@@ -3421,7 +5244,7 @@ begin
  Size:=(TextLength-Offset)+1;
  if (Offset<TextLength) and (ptrint(Size)>0) then begin
 
-  XorMask:=byte(Pattern);
+  XorMask:=byte(SearchChar);
   XorMask:=XorMask or (XorMask shl 8);
   XorMask:=XorMask or (XorMask shl 16);
 {$ifdef cpu64}
@@ -3453,7 +5276,7 @@ begin
    // Scan first chunk
    if (((XoredChunk+MaskA) and not XoredChunk) and MaskB)<>0 then begin
     while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
-     if CurrentChar^=Pattern then begin
+     if CurrentChar^=SearchChar then begin
       result:=ptruint(CurrentChar)-ptruint(Text);
       exit;
      end;
@@ -3466,25 +5289,25 @@ begin
     XoredChunk:=CurrentChunk^ xor XorMask;
     if (((XoredChunk+MaskA) and not XoredChunk) and MaskB)<>0 then begin
 {$ifdef POSCHARSAFECHECK}
-    CurrentChar:=pointer(CurrentChunk);
-    if CurrentChar[0]=Pattern then begin
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
       exit;
      end;
-     if CurrentChar[1]=Pattern then begin
+     if CurrentChar[1]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
       exit;
      end;
-     if CurrentChar[2]=Pattern then begin
+     if CurrentChar[2]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
       exit;
      end;
-     if CurrentChar[3]=Pattern then begin
+     if CurrentChar[3]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
       exit;
      end;
 {$ifdef cpu64}
-     if CurrentChar[4]=Pattern then begin
+     if CurrentChar[4]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
       exit;
      end;
@@ -3492,11 +5315,11 @@ begin
       result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
       exit;
      end;
-     if CurrentChar[6]=Pattern then begin
+     if CurrentChar[6]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
       exit;
      end;
-     if CurrentChar[7]=Pattern then begin
+     if CurrentChar[7]=SearchChar then begin
       result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
       exit;
      end;
@@ -3504,7 +5327,7 @@ begin
 {$else}
      CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
      XoredChunk:=XoredChunk xor XorMask;
-     while (XoredChunk<>0) and ((XoredChunk and $ff)<>byte(Pattern)) do begin
+     while (XoredChunk<>0) and ((XoredChunk and $ff)<>byte(SearchChar)) do begin
       XoredChunk:=XoredChunk shr 8;
       {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
      end;
@@ -3524,7 +5347,7 @@ begin
 
   // Scan rest of the remained characters, if there are any
   while Size>0 do begin
-   if CurrentChar^=Pattern then begin
+   if CurrentChar^=SearchChar then begin
     result:=ptruint(pointer(CurrentChar))-ptruint(Text);
     exit;
    end;
@@ -3535,7 +5358,1634 @@ begin
  end;
 end;
 
+function PtrPosCharSetOf2(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XoredChunk0,XoredChunk1,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     while ((XoredChunk0 or XoredChunk1)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf3(const SearchChar0,SearchChar1,SearchChar2:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XoredChunk0,XoredChunk1,XoredChunk2,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf4(const SearchChar0,SearchChar1,SearchChar2,SearchChar3:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XorMask3,XoredChunk0,XoredChunk1,XoredChunk2,XoredChunk3,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  XorMask3:=byte(SearchChar3);
+  XorMask3:=XorMask3 or (XorMask3 shl 8);
+  XorMask3:=XorMask3 or (XorMask3 shl 16);
+{$ifdef cpu64}
+  XorMask3:=XorMask3 or (XorMask3 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2,SearchChar3];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+    XoredChunk3:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2) or
+        ((XoredChunk3+MaskA) and not XoredChunk3)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2) or
+         ((XoredChunk3+MaskA) and not XoredChunk3)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     XoredChunk3:=XoredChunk3 xor XorMask3;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) and
+           ((XoredChunk3 and $ff)<>byte(SearchChar3)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      XoredChunk3:=XoredChunk3 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf5(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XorMask3,XorMask4,XoredChunk0,XoredChunk1,XoredChunk2,XoredChunk3,XoredChunk4,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  XorMask3:=byte(SearchChar3);
+  XorMask3:=XorMask3 or (XorMask3 shl 8);
+  XorMask3:=XorMask3 or (XorMask3 shl 16);
+{$ifdef cpu64}
+  XorMask3:=XorMask3 or (XorMask3 shl 32);
+{$endif}
+
+  XorMask4:=byte(SearchChar4);
+  XorMask4:=XorMask4 or (XorMask4 shl 8);
+  XorMask4:=XorMask4 or (XorMask4 shl 16);
+{$ifdef cpu64}
+  XorMask4:=XorMask4 or (XorMask4 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+    XoredChunk3:=0;
+    XoredChunk4:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2) or
+        ((XoredChunk3+MaskA) and not XoredChunk3) or
+        ((XoredChunk4+MaskA) and not XoredChunk4)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2) or
+         ((XoredChunk3+MaskA) and not XoredChunk3) or
+         ((XoredChunk4+MaskA) and not XoredChunk4)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     XoredChunk3:=XoredChunk3 xor XorMask3;
+     XoredChunk4:=XoredChunk4 xor XorMask4;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) and
+           ((XoredChunk3 and $ff)<>byte(SearchChar3)) and
+           ((XoredChunk4 and $ff)<>byte(SearchChar4)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      XoredChunk3:=XoredChunk3 shr 8;
+      XoredChunk4:=XoredChunk4 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf6(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XorMask3,XorMask4,XorMask5,XoredChunk0,XoredChunk1,XoredChunk2,XoredChunk3,XoredChunk4,XoredChunk5,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  XorMask3:=byte(SearchChar3);
+  XorMask3:=XorMask3 or (XorMask3 shl 8);
+  XorMask3:=XorMask3 or (XorMask3 shl 16);
+{$ifdef cpu64}
+  XorMask3:=XorMask3 or (XorMask3 shl 32);
+{$endif}
+
+  XorMask4:=byte(SearchChar4);
+  XorMask4:=XorMask4 or (XorMask4 shl 8);
+  XorMask4:=XorMask4 or (XorMask4 shl 16);
+{$ifdef cpu64}
+  XorMask4:=XorMask4 or (XorMask4 shl 32);
+{$endif}
+
+  XorMask5:=byte(SearchChar5);
+  XorMask5:=XorMask5 or (XorMask5 shl 8);
+  XorMask5:=XorMask5 or (XorMask5 shl 16);
+{$ifdef cpu64}
+  XorMask5:=XorMask5 or (XorMask5 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+    XoredChunk3:=0;
+    XoredChunk4:=0;
+    XoredChunk5:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2) or
+        ((XoredChunk3+MaskA) and not XoredChunk3) or
+        ((XoredChunk4+MaskA) and not XoredChunk4) or
+        ((XoredChunk5+MaskA) and not XoredChunk5)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2) or
+         ((XoredChunk3+MaskA) and not XoredChunk3) or
+         ((XoredChunk4+MaskA) and not XoredChunk4) or
+         ((XoredChunk5+MaskA) and not XoredChunk5)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     XoredChunk3:=XoredChunk3 xor XorMask3;
+     XoredChunk4:=XoredChunk4 xor XorMask4;
+     XoredChunk5:=XoredChunk5 xor XorMask5;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) and
+           ((XoredChunk3 and $ff)<>byte(SearchChar3)) and
+           ((XoredChunk4 and $ff)<>byte(SearchChar4)) and
+           ((XoredChunk5 and $ff)<>byte(SearchChar5)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      XoredChunk3:=XoredChunk3 shr 8;
+      XoredChunk4:=XoredChunk4 shr 8;
+      XoredChunk5:=XoredChunk5 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf7(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XorMask3,XorMask4,XorMask5,XorMask6,XoredChunk0,XoredChunk1,XoredChunk2,XoredChunk3,XoredChunk4,XoredChunk5,XoredChunk6,CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  XorMask3:=byte(SearchChar3);
+  XorMask3:=XorMask3 or (XorMask3 shl 8);
+  XorMask3:=XorMask3 or (XorMask3 shl 16);
+{$ifdef cpu64}
+  XorMask3:=XorMask3 or (XorMask3 shl 32);
+{$endif}
+
+  XorMask4:=byte(SearchChar4);
+  XorMask4:=XorMask4 or (XorMask4 shl 8);
+  XorMask4:=XorMask4 or (XorMask4 shl 16);
+{$ifdef cpu64}
+  XorMask4:=XorMask4 or (XorMask4 shl 32);
+{$endif}
+
+  XorMask5:=byte(SearchChar5);
+  XorMask5:=XorMask5 or (XorMask5 shl 8);
+  XorMask5:=XorMask5 or (XorMask5 shl 16);
+{$ifdef cpu64}
+  XorMask5:=XorMask5 or (XorMask5 shl 32);
+{$endif}
+
+  XorMask6:=byte(SearchChar6);
+  XorMask6:=XorMask6 or (XorMask6 shl 8);
+  XorMask6:=XorMask6 or (XorMask6 shl 16);
+{$ifdef cpu64}
+  XorMask6:=XorMask6 or (XorMask6 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+    XoredChunk6:=CurrentChunkValue xor XorMask6;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+    XoredChunk3:=0;
+    XoredChunk4:=0;
+    XoredChunk5:=0;
+    XoredChunk6:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2) or
+        ((XoredChunk3+MaskA) and not XoredChunk3) or
+        ((XoredChunk4+MaskA) and not XoredChunk4) or
+        ((XoredChunk5+MaskA) and not XoredChunk5) or
+        ((XoredChunk6+MaskA) and not XoredChunk6)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+    XoredChunk6:=CurrentChunkValue xor XorMask6;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2) or
+         ((XoredChunk3+MaskA) and not XoredChunk3) or
+         ((XoredChunk4+MaskA) and not XoredChunk4) or
+         ((XoredChunk5+MaskA) and not XoredChunk5) or
+         ((XoredChunk6+MaskA) and not XoredChunk6)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     XoredChunk3:=XoredChunk3 xor XorMask3;
+     XoredChunk4:=XoredChunk4 xor XorMask4;
+     XoredChunk5:=XoredChunk5 xor XorMask5;
+     XoredChunk6:=XoredChunk6 xor XorMask6;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5 or XoredChunk6)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) and
+           ((XoredChunk3 and $ff)<>byte(SearchChar3)) and
+           ((XoredChunk4 and $ff)<>byte(SearchChar4)) and
+           ((XoredChunk5 and $ff)<>byte(SearchChar5)) and
+           ((XoredChunk6 and $ff)<>byte(SearchChar6)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      XoredChunk3:=XoredChunk3 shr 8;
+      XoredChunk4:=XoredChunk4 shr 8;
+      XoredChunk5:=XoredChunk5 shr 8;
+      XoredChunk6:=XoredChunk6 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5 or XoredChunk6)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharSetOf8(const SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6,SearchChar7:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):longint;
+type pptruint=^ptruint;
+const MaskA=ptruint({$ifdef cpu64}$fefefefefefefeff{$else}$fefefeff{$endif}); // it is: 0-$01010101 / 0-$0101010101010101
+      MaskB=ptruint({$ifdef cpu64}$8080808080808080{$else}$80808080{$endif});
+var CurrentChar:PFLRERawByteChar;
+    CurrentChunk:pptruint;
+    XorMask0,XorMask1,XorMask2,XorMask3,XorMask4,XorMask5,XorMask6,XorMask7,
+    XoredChunk0,XoredChunk1,XoredChunk2,XoredChunk3,XoredChunk4,XoredChunk5,XoredChunk6,XoredChunk7,
+    CurrentChunkValue,Size:ptruint;
+    CharSet:TFLRERawByteCharSet;
+begin
+ result:=-1;
+
+ Size:=(TextLength-Offset)+1;
+ if (Offset<TextLength) and (ptrint(Size)>0) then begin
+
+  XorMask0:=byte(SearchChar0);
+  XorMask0:=XorMask0 or (XorMask0 shl 8);
+  XorMask0:=XorMask0 or (XorMask0 shl 16);
+{$ifdef cpu64}
+  XorMask0:=XorMask0 or (XorMask0 shl 32);
+{$endif}
+
+  XorMask1:=byte(SearchChar1);
+  XorMask1:=XorMask1 or (XorMask1 shl 8);
+  XorMask1:=XorMask1 or (XorMask1 shl 16);
+{$ifdef cpu64}
+  XorMask1:=XorMask1 or (XorMask1 shl 32);
+{$endif}
+
+  XorMask2:=byte(SearchChar2);
+  XorMask2:=XorMask2 or (XorMask2 shl 8);
+  XorMask2:=XorMask2 or (XorMask2 shl 16);
+{$ifdef cpu64}
+  XorMask2:=XorMask2 or (XorMask2 shl 32);
+{$endif}
+
+  XorMask3:=byte(SearchChar3);
+  XorMask3:=XorMask3 or (XorMask3 shl 8);
+  XorMask3:=XorMask3 or (XorMask3 shl 16);
+{$ifdef cpu64}
+  XorMask3:=XorMask3 or (XorMask3 shl 32);
+{$endif}
+
+  XorMask4:=byte(SearchChar4);
+  XorMask4:=XorMask4 or (XorMask4 shl 8);
+  XorMask4:=XorMask4 or (XorMask4 shl 16);
+{$ifdef cpu64}
+  XorMask4:=XorMask4 or (XorMask4 shl 32);
+{$endif}
+
+  XorMask5:=byte(SearchChar5);
+  XorMask5:=XorMask5 or (XorMask5 shl 8);
+  XorMask5:=XorMask5 or (XorMask5 shl 16);
+{$ifdef cpu64}
+  XorMask5:=XorMask5 or (XorMask5 shl 32);
+{$endif}
+
+  XorMask6:=byte(SearchChar6);
+  XorMask6:=XorMask6 or (XorMask6 shl 8);
+  XorMask6:=XorMask6 or (XorMask6 shl 16);
+{$ifdef cpu64}
+  XorMask6:=XorMask6 or (XorMask6 shl 32);
+{$endif}
+
+  XorMask7:=byte(SearchChar7);
+  XorMask7:=XorMask7 or (XorMask7 shl 8);
+  XorMask7:=XorMask7 or (XorMask7 shl 16);
+{$ifdef cpu64}
+  XorMask7:=XorMask7 or (XorMask7 shl 32);
+{$endif}
+
+  CharSet:=[SearchChar0,SearchChar1,SearchChar2,SearchChar3,SearchChar4,SearchChar5,SearchChar6,SearchChar7];
+
+  CurrentChar:=@Text[Offset];
+
+  if Size>(SizeOf(ptruint)*2) then begin
+
+   // Alignment initialization
+   CurrentChunk:=pointer(ptruint(ptruint(CurrentChar) and not (SizeOf(ptruint)-1)));
+
+   // Try to get first chunk
+   if ptruint(CurrentChunk)>=ptruint(Text) then begin
+    // Yes, we can the get first chunk
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+    XoredChunk6:=CurrentChunkValue xor XorMask6;
+    XoredChunk7:=CurrentChunkValue xor XorMask7;
+   end else begin
+    // No, so return dummy value to force to check the few first characters
+    XoredChunk0:=0;
+    XoredChunk1:=0;
+    XoredChunk2:=0;
+    XoredChunk3:=0;
+    XoredChunk4:=0;
+    XoredChunk5:=0;
+    XoredChunk6:=0;
+    XoredChunk7:=0;
+   end;
+
+   // Jump to next chunk
+   inc(CurrentChunk);
+
+   // Subtract the first chunk from size
+   dec(ptruint(Size),ptruint(CurrentChunk)-ptruint(CurrentChar));
+
+   // Scan first chunk
+   if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+        ((XoredChunk1+MaskA) and not XoredChunk1) or
+        ((XoredChunk2+MaskA) and not XoredChunk2) or
+        ((XoredChunk3+MaskA) and not XoredChunk3) or
+        ((XoredChunk4+MaskA) and not XoredChunk4) or
+        ((XoredChunk5+MaskA) and not XoredChunk5) or
+        ((XoredChunk6+MaskA) and not XoredChunk6) or
+        ((XoredChunk7+MaskA) and not XoredChunk7)) and MaskB)<>0 then begin
+    while ptruint(CurrentChar)<ptruint(CurrentChunk) do begin
+     if CurrentChar^ in CharSet then begin
+      result:=ptruint(CurrentChar)-ptruint(Text);
+      exit;
+     end;
+     inc(CurrentChar);
+    end;
+   end;
+
+   // Scan until the last whole chunk
+   while Size>=SizeOf(ptruint) do begin
+    CurrentChunkValue:=CurrentChunk^;
+    XoredChunk0:=CurrentChunkValue xor XorMask0;
+    XoredChunk1:=CurrentChunkValue xor XorMask1;
+    XoredChunk2:=CurrentChunkValue xor XorMask2;
+    XoredChunk3:=CurrentChunkValue xor XorMask3;
+    XoredChunk4:=CurrentChunkValue xor XorMask4;
+    XoredChunk5:=CurrentChunkValue xor XorMask5;
+    XoredChunk6:=CurrentChunkValue xor XorMask6;
+    XoredChunk7:=CurrentChunkValue xor XorMask7;
+    if ((((XoredChunk0+MaskA) and not XoredChunk0) or
+         ((XoredChunk1+MaskA) and not XoredChunk1) or
+         ((XoredChunk2+MaskA) and not XoredChunk2) or
+         ((XoredChunk3+MaskA) and not XoredChunk3) or
+         ((XoredChunk4+MaskA) and not XoredChunk4) or
+         ((XoredChunk5+MaskA) and not XoredChunk5) or
+         ((XoredChunk6+MaskA) and not XoredChunk6) or
+         ((XoredChunk7+MaskA) and not XoredChunk7)) and MaskB)<>0 then begin
+{$ifdef POSCHARSAFECHECK}
+     CurrentChar:=pointer(CurrentChunk);
+     if CurrentChar[0] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[0]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[1] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[1]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[2] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[2]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[3] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[3]))-ptruint(Text);
+      exit;
+     end;
+{$ifdef cpu64}
+     if CurrentChar[4] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[4]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[5] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[5]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[6] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[6]))-ptruint(Text);
+      exit;
+     end;
+     if CurrentChar[7] in CharSet then begin
+      result:=ptruint(pointer(@CurrentChar[7]))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+{$else}
+     CurrentChar:=pointer({$ifdef BIG_ENDIAN}ptruint(ptruint(CurrentChunk)+ptruint(SizeOf(ptruint)-1)){$else}CurrentChunk{$endif});
+     XoredChunk0:=XoredChunk0 xor XorMask0;
+     XoredChunk1:=XoredChunk1 xor XorMask1;
+     XoredChunk2:=XoredChunk2 xor XorMask2;
+     XoredChunk3:=XoredChunk3 xor XorMask3;
+     XoredChunk4:=XoredChunk4 xor XorMask4;
+     XoredChunk5:=XoredChunk5 xor XorMask5;
+     XoredChunk6:=XoredChunk6 xor XorMask6;
+     XoredChunk7:=XoredChunk7 xor XorMask7;
+     while ((XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5 or XoredChunk6 or XoredChunk7)<>0) and
+           ((XoredChunk0 and $ff)<>byte(SearchChar0)) and
+           ((XoredChunk1 and $ff)<>byte(SearchChar1)) and
+           ((XoredChunk2 and $ff)<>byte(SearchChar2)) and
+           ((XoredChunk3 and $ff)<>byte(SearchChar3)) and
+           ((XoredChunk4 and $ff)<>byte(SearchChar4)) and
+           ((XoredChunk5 and $ff)<>byte(SearchChar5)) and
+           ((XoredChunk6 and $ff)<>byte(SearchChar6)) and
+           ((XoredChunk7 and $ff)<>byte(SearchChar7)) do begin
+      XoredChunk0:=XoredChunk0 shr 8;
+      XoredChunk1:=XoredChunk1 shr 8;
+      XoredChunk2:=XoredChunk2 shr 8;
+      XoredChunk3:=XoredChunk3 shr 8;
+      XoredChunk4:=XoredChunk4 shr 8;
+      XoredChunk5:=XoredChunk5 shr 8;
+      XoredChunk6:=XoredChunk6 shr 8;
+      XoredChunk7:=XoredChunk7 shr 8;
+      {$ifdef BIG_ENDIAN}dec{$else}inc{$endif}(CurrentChar);
+     end;
+     if (XoredChunk0 or XoredChunk1 or XoredChunk2 or XoredChunk3 or XoredChunk4 or XoredChunk5 or XoredChunk6 or XoredChunk7)<>0 then begin
+      result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+      exit;
+     end;
+{$endif}
+    end;
+    inc(CurrentChunk);
+    dec(Size,SizeOf(ptruint));
+   end;
+
+   // Set chunkwise to charwise pointer
+   CurrentChar:=pointer(CurrentChunk);
+  end;
+
+  // Scan rest of the remained characters, if there are any
+  while Size>0 do begin
+   if CurrentChar^ in CharSet then begin
+    result:=ptruint(pointer(CurrentChar))-ptruint(Text);
+    exit;
+   end;
+   inc(CurrentChar);
+   dec(Size);
+  end;
+
+ end;
+end;
+
+function PtrPosCharPair(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ Index:=Offset;
+ while Index<(TextLength-1) do begin
+  result:=PtrPosChar(SearchChar0,Text,TextLength,Index);
+  if result<0 then begin
+   exit;
+  end else if result>=(TextLength-1) then begin
+   break;
+  end else if Text[result+1]=SearchChar1 then begin
+   exit;
+  end else begin
+   Index:=result+1;
+  end;
+ end;
+ result:=-1;
+end;
+
+function PtrPosCharSetOf2Of2(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ Index:=Offset;
+ while Index<(TextLength-1) do begin
+  result:=PtrPosCharSetOf2(SearchChar0,SearchChar1,Text,TextLength,Index);
+  if result<0 then begin
+   exit;
+  end else if result>=(TextLength-1) then begin
+   break;
+  end else if (Text[result+1]=SearchChar0) or (Text[result+1]=SearchChar1) then begin
+   exit;
+  end else begin
+   Index:=result+1;
+  end;
+ end;
+ result:=-1;
+end;
+
+function PtrPosCharSetOf2Of3(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ Index:=Offset;
+ while Index<(TextLength-2) do begin
+  result:=PtrPosCharSetOf2(SearchChar0,SearchChar1,Text,TextLength,Index);
+  if result<0 then begin
+   exit;
+  end else if result>=(TextLength-2) then begin
+   break;
+  end else if ((Text[result+1]=SearchChar0) or (Text[result+1]=SearchChar1)) and
+              ((Text[result+2]=SearchChar0) or (Text[result+2]=SearchChar1)) then begin
+   exit;
+  end else begin
+   Index:=result+1;
+  end;
+ end;
+ result:=-1;
+end;
+
+function PtrPosCharSetOf2Of4(const SearchChar0,SearchChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ Index:=Offset;
+ while Index<(TextLength-3) do begin
+  result:=PtrPosCharSetOf2(SearchChar0,SearchChar1,Text,TextLength,Index);
+  if result<0 then begin
+   exit;
+  end else if result>=(TextLength-3) then begin
+   break;
+  end else if ((Text[result+1]=SearchChar0) or (Text[result+1]=SearchChar1)) and
+              ((Text[result+2]=SearchChar0) or (Text[result+2]=SearchChar1)) and
+              ((Text[result+3]=SearchChar0) or (Text[result+3]=SearchChar1)) then begin
+   exit;
+  end else begin
+   Index:=result+1;
+  end;
+ end;
+ result:=-1;
+end;
+
+function PtrPosCharRange(const SearchFromChar,SearchToChar:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ for Index:=Offset to TextLength-1 do begin
+  CurrentChar:=Text[Index];
+  if (CurrentChar>=SearchFromChar) and (CurrentChar<=SearchToChar) then begin
+   result:=Index;
+   exit;
+  end;
+ end;
+ result:=-1;
+end;
+
+function PtrPosCharRangeOf2(const SearchFromChar0,SearchToChar0,SearchFromChar1,SearchToChar1:TFLRERawByteChar;const Text:PFLRERawByteChar;TextLength:longint;Offset:longint=0):ptrint;
+var Index:longint;
+    CurrentChar:TFLRERawByteChar;
+begin
+ for Index:=Offset to TextLength-2 do begin
+  CurrentChar:=Text[Index];
+  if (CurrentChar>=SearchFromChar0) and (CurrentChar<=SearchToChar0) then begin
+   CurrentChar:=Text[Index+1];
+   if (CurrentChar>=SearchFromChar1) and (CurrentChar<=SearchToChar1) then begin
+    result:=Index;
+    exit;
+   end;
+  end;
+ end;
+ result:=-1;
+end;
+{$endif}
+
 function PtrPosBoyerMoore(const Pattern:TFLRERawByteString;const Text:PFLRERawByteChar;const TextLength:longint;const Skip:TFLRECharPatternBitMasks;const Next:TFLREBoyerMooreNext;Position:longint=0):longint;
+{$if defined(cpux86_64) and defined(Windows) and not defined(fpc)}assembler; register;
+asm
+ // r15 = Pattern
+ // r14 = Text
+ // eax = TextLength
+ // r13 = Skip
+ // r12 = Next
+ // edi = Position
+ // esi = result
+ // ecx = PatternPosition
+ // eax = BadSkip
+ // edx = GoodSkip
+ // ebx = PatternLength
+
+ lea rsp,qword ptr [rsp-96]
+ mov qword ptr [rbp-64],rbx
+ mov qword ptr [rbp-56],rdi
+ mov qword ptr [rbp-48],rsi
+ mov qword ptr [rbp-40],r12
+ mov qword ptr [rbp-32],r13
+ mov qword ptr [rbp-24],r14
+ mov qword ptr [rbp-16],r15
+ mov r15,rcx
+ mov r14,rdx
+ mov eax,r8d
+ mov qword ptr [rbp-8],rax
+ mov r13,r9
+ mov r12,qword ptr [rbp+48]
+ mov edi,dword ptr [rbp+56]
+
+ // PatternLength:=length(Pattern);
+ mov rax,r15
+ test rax,rax
+ je @SkipPatternLengthRead
+ mov rax,qword ptr [rax-8]
+ @SkipPatternLengthRead:
+
+ mov ebx,eax
+
+ // result:=-1;
+ mov esi,-1
+
+ // if PatternLength<>0 then begin
+ test ebx,ebx
+ je @Done
+
+ // Position:=PtrPosChar(Pattern[1],Text,TextLength,Position);
+ mov r9d,edi
+ mov eax,dword ptr [rbp-8]
+ mov r8d,eax
+ mov rdx,r14
+ movzx ecx,byte ptr [r15]
+
+ call PtrPosChar
+ mov edi,eax
+
+ // if Position>=0 then begin
+ cmp edi,0
+ jnge @Done
+
+ // inc(Position,PatternLength-1);
+ lea eax,dword ptr [ebx-1]
+ add edi,eax
+
+ // while Position<TextLength do begin
+ jmp @Loop0Start
+
+ .align 8
+@Loop0:
+
+ // PatternPosition:=0;
+ mov ecx,0
+
+ // while (PatternPosition<PatternLength) and (Text[Position-PatternPosition]=Pattern[PatternLength-PatternPosition]) do begin
+ jmp @Loop1Start
+
+ .align 8
+@Loop1:
+
+ // inc(PatternPosition);
+ add ecx,1
+
+@Loop1Start:
+ cmp ecx,ebx
+ jnl @Loop1Break
+
+ movsxd r9,edi
+ movsxd r8,ecx
+ sub r9,r8
+ mov r10,r9
+ movsxd r9,ebx
+ sub r9,r8
+ mov r8b,byte ptr [r14+r10*1]
+ cmp r8b,byte ptr [r15+r9*1-1]
+ je @Loop1
+
+@Loop1Break:
+
+ // if PatternPosition<>PatternLength then begin
+ cmp ecx,ebx
+ je @Break
+
+ // BadSkip:=Skip[Text[Position-PatternPosition]];
+ movsxd r8,edi
+ movsxd r9,ecx
+ sub r8,r9
+ movzx r8d,byte ptr [r14+r8*1]
+ mov eax,dword ptr [r13+r8*4]
+
+ // GoodSkip:=Next[PatternPosition];
+ movsxd r8,ecx
+ mov edx,dword ptr [r12+r8*4]
+
+ // if BadSkip>GoodSkip then begin
+ cmp eax,edx
+ jng @GoodSkip
+
+ // inc(Position,BadSkip-PatternPosition);
+ mov r8d,eax
+ sub r8d,ecx
+ add edi,r8d
+ jmp @NextInLoop0
+
+@GoodSkip:
+
+ // inc(Position,GoodSkip);
+ add edi,edx
+ jmp @NextInLoop0
+
+@Break:
+ // result:=(Position-PatternLength)+1;
+ mov r8d,edi
+ sub r8d,ebx
+ lea r8d,dword ptr [r8d+1]
+ mov esi,r8d
+
+ // exit;
+ jmp @Done
+
+@NextInLoop0:
+@Loop0Start:
+
+ mov r8d,dword ptr [rbp-8]
+ cmp edi,r8d
+ jl @Loop0
+
+@Done:
+
+ // end;
+ mov eax,esi
+ mov rbx,qword ptr [rbp-64]
+ mov rdi,qword ptr [rbp-56]
+ mov rsi,qword ptr [rbp-48]
+ mov r12,qword ptr [rbp-40]
+ mov r13,qword ptr [rbp-32]
+ mov r14,qword ptr [rbp-24]
+ mov r15,qword ptr [rbp-16]
+end;
+{$else}
 var PatternPosition,BadSkip,GoodSkip,PatternLength:longint;
 begin
  PatternLength:=length(Pattern);
@@ -3565,8 +7015,52 @@ begin
   end;
  end;
 end;
+{$ifend}
 
-function PtrPosPatternCharClass(const Text:PFLRERawByteChar;TextLength:longint;const PatternCharClass:TFLRECharClass;Position:longint=0):longint; {$ifdef cpu386}register;{$endif}
+function PtrPosPatternCharClass(const Text:PFLRERawByteChar;TextLength:longint;const PatternCharClass:TFLRECharClass;Position:longint=0):longint;
+{$if defined(cpux86_64) and defined(Windows) and not defined(fpc)}assembler; register;
+asm
+ // rcx = Text
+ // edx = TextLength
+ // r8 = PatternCharClass
+ // r9d = Position
+ // eax = result
+ // r9d = Index
+
+ // for Index:=Position to TextLength-1 do begin
+ lea edx,dword ptr [edx-1]
+ cmp edx,r9d
+ jl @Fail
+ sub r9d,1
+
+ .align 8
+@Loop:
+ add r9d,1
+
+ // if Text[Index] in PatternCharClass then begin
+ movsxd r10,r9d
+ movzx r10d,byte ptr [rcx+r10*1]
+ bt dword ptr [r8],r10d
+ jnc @NextInLoop
+
+ // result:=Index;
+ mov eax,r9d
+
+ // exit;
+ jmp @Done
+
+@NextInLoop:
+ cmp edx,r9d
+ jg @Loop
+
+@Fail:
+ // result:=-1;
+ mov eax,-1
+
+@Done:
+end;
+{$else}
+{$ifdef cpu386}register;{$endif}
 var Index:longint;
 begin
  for Index:=Position to TextLength-1 do begin
@@ -3577,8 +7071,104 @@ begin
  end;
  result:=-1;
 end;
+{$ifend}
 
 function PtrPosPatternSBNDMQ1(PatternLength:longint;const Text:PFLRERawByteChar;TextLength:longint;const PatternBitMasks:TFLRECharPatternBitMasks;Position:longint=0):longint;
+{$if defined(cpux86_64) and defined(Windows) and not defined(fpc)}assembler; register;
+asm
+ // ecx = PatternLength
+ // rdx = Text
+ // r8d = TextLength
+ // r9 = PatternBitMasks
+ // r11d = Position
+ // eax = result
+ // ebx = CheckPosition
+ // esi = State
+ lea rsp,qword ptr [rsp-32]
+ mov qword ptr [rbp-24],rbx
+ mov qword ptr [rbp-16],rdi
+ mov qword ptr [rbp-8],rsi
+ mov r11d,dword ptr [rbp+48]
+
+ // inc(Position,PatternLength-1);
+ lea eax,dword ptr [ecx-1]
+ add r11d,eax
+
+ // while Position<TextLength do begin
+ jmp @Loop0Start
+
+ .align 8
+@Loop0:
+
+ // State:=PatternBitMasks[Text[Position]];
+ movsxd r10,r11d
+ movzx r10d,byte ptr [rdx+r10*1]
+ mov esi,dword ptr [r9+r10*4]
+
+ // if State<>0 then begin
+ test esi,esi
+ je @NextPosition
+
+ // CheckPosition:=Position-PatternLength;
+ mov r10d,r11d
+ sub r10d,ecx
+ mov ebx,r10d
+
+ .align 8
+ @Loop1:
+
+ // dec(Position);
+ sub r11d,1
+
+ // if Position<0 then begin
+ js @Loop1Break
+//cmp r11d,0
+//jl @Loop1Break
+
+ // State:=(State shr 1) and PatternBitMasks[Text[Position]];
+ movsxd r10,r11d
+ movzx edi,byte ptr [rdx+r10*1]
+ mov r10d,esi
+ shr r10d,1
+ mov edi,dword ptr [r9+rdi*4]
+ and r10d,edi
+ mov esi,r10d
+
+ // until State=0;
+ test esi,esi
+ jne @Loop1
+@Loop1Break:
+
+ // if Position=CheckPosition then begin
+ cmp r11d,ebx
+ jne @NextPosition
+
+ // result:=CheckPosition+1;
+ lea r10d,dword ptr [ebx+1]
+ mov eax,r10d
+
+ // exit;
+ jmp @Done
+
+@NextPosition:
+ // inc(Position,PatternLength);
+ add r11d,ecx
+
+@Loop0Start:
+ cmp r11d,r8d
+ jl @Loop0
+
+ // result:=-1;
+ mov eax,-1
+
+@Done:
+
+ // end;
+ mov rbx,qword ptr [rbp-24]
+ mov rdi,qword ptr [rbp-16]
+ mov rsi,qword ptr [rbp-8]
+end;
+{$else}
 var CheckPosition:longint;
     State:longword;
 begin
@@ -3603,8 +7193,115 @@ begin
  end;
  result:=-1;
 end;
+{$ifend}
 
 function PtrPosPatternSBNDMQ2(PatternLength:longint;const Text:PFLRERawByteChar;TextLength:longint;const PatternBitMasks:TFLRECharPatternBitMasks;Position:longint=0):longint;
+{$if defined(cpux86_64) and defined(Windows) and not defined(fpc)}assembler; register;
+asm
+ // ecx = PatternLength
+ // rdx = Text
+ // r8d = TextLength
+ // r9 = PatternBitMasks
+ // r11d = Position
+ // eax = result
+ // esi = CheckPosition
+ // edi = State
+ lea rsp,qword ptr [rsp-32]
+ mov qword ptr [rbp-24],rbx
+ mov qword ptr [rbp-16],rdi
+ mov qword ptr [rbp-8],rsi
+ mov r11d,dword ptr [rbp+48]
+
+ // inc(Position,PatternLength-2);
+ lea eax,dword ptr [ecx-2]
+ add r11d,eax
+
+ // dec(TextLength):
+ sub r8d,1
+
+ // while Position<TextLength do begin
+ jmp @Loop0Start
+
+ .align 8
+@Loop0:
+
+ // State:=(PatternBitMasks[Text[Position+1]] shr 1) and PatternBitMasks[Text[Position]];
+ movsxd r10,r11d
+ movzx ebx,byte ptr [rdx+r10*1+1]
+ mov ebx,dword ptr [r9+rbx*4]
+ shr ebx,1
+ movzx r10d,byte ptr [rdx+r10*1]
+ mov r10d,dword ptr [r9+r10*4]
+ and r10d,ebx
+ mov edi,r10d
+
+ // if State<>0 then begin
+ test edi,edi
+ je @NextPosition
+
+ // CheckPosition:=Position-(PatternLength-1);
+ lea ebx,dword ptr [ecx-1]
+ mov r10d,r11d
+ sub r10d,ebx
+ mov esi,r10d
+
+ .align 8
+@Loop1:
+
+ // dec(Position);
+ sub r11d,1
+
+ // if Position<0 then begin
+ js @Loop1Break
+//cmp r11d,0
+//jl @Loop1Break
+
+ // State:=(State shr 1) and PatternBitMasks[Text[Position]];
+ movsxd r10,r11d
+ movzx ebx,byte ptr [rdx+r10*1]
+ mov r10d,edi
+ shr r10d,1
+ mov ebx,dword ptr [r9+rbx*4]
+ and r10d,ebx
+ mov edi,r10d
+
+ // until State=0;
+ test edi,edi
+ jne @Loop1
+@Loop1Break:
+
+ // if Position=CheckPosition then begin
+ cmp r11d,esi
+ jne @NextPosition
+
+ // result:=CheckPosition+1;
+ lea r10d,dword ptr [esi+1]
+ mov eax,r10d
+
+ // exit;
+ jmp @Done
+
+@NextPosition:
+
+ // inc(Position,PatternLength-1);
+ lea r10d,dword ptr [ecx-1]
+ add r11d,r10d
+
+@Loop0Start:
+ cmp r11d,r8d
+ jl @Loop0
+
+ // result:=-1;
+ mov eax,-1
+
+@Done:
+
+ // end;
+ mov rbx,qword ptr [rbp-24]
+ mov rdi,qword ptr [rbp-16]
+ mov rsi,qword ptr [rbp-8]
+end;
+{$else}
 var CheckPosition:longint;
     State:longword;
 begin
@@ -3630,6 +7327,7 @@ begin
  end;
  result:=-1;
 end;
+{$ifend}
 
 function FLREPtrCopy(const Src:PFLRERawByteChar;const From,Len:longint):TFLRERawByteString;
 begin
@@ -3945,7 +7643,7 @@ end;
 {$endif}
 
 function UTF8RangeToRegEx(Lo,Hi:longword):TFLRERawByteString;
-type TString6Chars=array[0..6] of ansichar;
+type TString6Chars=array[0..6] of TFLRERawByteChar;
 const Seq0010ffff:array[0..6,0..4,0..1] of longint=((($00,$7f),(-1,-1),(-1,-1),(-1,-1),(-1,-1)),        // 00-7F
                                                     (($c2,$df),($80,$bf),(-1,-1),(-1,-1),(-1,-1)),      // C2-DF 80-BF
                                                     (($e0,$e0),($a0,$bf),($80,$bf),(-1,-1),(-1,-1)),    // E0-E0 A0-BF 80-BF
@@ -3953,53 +7651,53 @@ const Seq0010ffff:array[0..6,0..4,0..1] of longint=((($00,$7f),(-1,-1),(-1,-1),(
                                                     (($f0,$f0),($80,$bf),($80,$bf),($80,$bf),(-1,-1)),  // F0-F0 90-BF 80-BF 80-BF
                                                     (($f1,$f3),($80,$bf),($80,$bf),($80,$bf),(-1,-1)),  // F1-F3 80-BF 80-BF 80-BF
                                                     (($f4,$f4),($80,$bf),($80,$bf),($80,$bf),(-1,-1))); // F4-F4 80-8F 80-BF 80-BF
-      HexChars:array[$0..$f] of ansichar='0123456789ABCDEF';
+      HexChars:array[$0..$f] of TFLRERawByteChar='0123456789ABCDEF';
 var OutputCharSequence:TFLRERawByteString;
  function ToString(CharValue:longword):TString6Chars;
  begin
   case CharValue of
    $00000000..$0000007f:begin
-    result[0]:=ansichar(byte(1));
-    result[1]:=ansichar(byte(CharValue));
+    result[0]:=TFLRERawByteChar(byte(1));
+    result[1]:=TFLRERawByteChar(byte(CharValue));
    end;
    $00000080..$000007ff:begin
-    result[0]:=ansichar(byte(2));
-    result[1]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-    result[2]:=ansichar(byte($80 or (CharValue and $3f)));
+    result[0]:=TFLRERawByteChar(byte(2));
+    result[1]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+    result[2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    end;
 // {$ifdef PLREStrictUTF8}$00000800..$0000d7ff,$0000e000..$0000ffff{$else}$00000800..$0000ffff{$endif}:begin
    $00000800..$0000ffff:begin
-    result[0]:=ansichar(byte(3));
-    result[1]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-    result[2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    result[3]:=ansichar(byte($80 or (CharValue and $3f)));
+    result[0]:=TFLRERawByteChar(byte(3));
+    result[1]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+    result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    result[3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    end;
    $00010000..$0010ffff:begin
-    result[0]:=ansichar(byte(4));
-    result[1]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-    result[2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    result[3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    result[4]:=ansichar(byte($80 or (CharValue and $3f)));
+    result[0]:=TFLRERawByteChar(byte(4));
+    result[1]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+    result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    result[4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    end;
    $00200000..$03ffffff:begin
-    result[0]:=ansichar(byte(5));
-    result[1]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-    result[2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    result[3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    result[4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    result[5]:=ansichar(byte($80 or (CharValue and $3f)));
+    result[0]:=TFLRERawByteChar(byte(5));
+    result[1]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+    result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    result[4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    result[5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    end;
    $04000000..$7fffffff:begin
-    result[0]:=ansichar(byte(6));
-    result[1]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-    result[2]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-    result[3]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-    result[4]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-    result[5]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-    result[6]:=ansichar(byte($80 or (CharValue and $3f)));
+    result[0]:=TFLRERawByteChar(byte(6));
+    result[1]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+    result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+    result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+    result[4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+    result[5]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+    result[6]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
    end;
    else begin
-    result[0]:=ansichar(byte(3));
+    result[0]:=TFLRERawByteChar(byte(3));
     result[1]:=#$ef;
     result[2]:=#$bf;
     result[3]:=#$bd;
@@ -4007,7 +7705,7 @@ var OutputCharSequence:TFLRERawByteString;
   end;
  end;
  procedure AddRange(Lo,Hi:byte);
- var Data:array[0..11] of ansichar;
+ var Data:array[0..11] of TFLRERawByteChar;
  begin
   Data:='[\x00-\x00]';
   Data[3]:=HexChars[(Lo shr 4) and $f];
@@ -4078,8 +7776,8 @@ var OutputCharSequence:TFLRERawByteString;
      end;
      StrLo:=ToString(Lo);
      StrHi:=ToString(Hi);
-     if byte(ansichar(StrLo[0]))=byte(ansichar(StrHi[0])) then begin
-      for i:=1 to byte(ansichar(StrLo[0])) do begin
+     if byte(TFLRERawByteChar(StrLo[0]))=byte(TFLRERawByteChar(StrHi[0])) then begin
+      for i:=1 to byte(TFLRERawByteChar(StrLo[0])) do begin
        AddRange(byte(StrLo[i]),byte(StrHi[i]));
       end;
       OutputCharSequence:=OutputCharSequence+'|';
@@ -5444,7 +9142,7 @@ type TFLREUnicodeCharClass=class;
        destructor Destroy; override;
      end;
 
-     TFLREUnicodeCharClassCharSet=set of ansichar;
+     TFLREUnicodeCharClassCharSet=set of TFLRERawByteChar;
 
      TFLREUnicodeCharClassRanges=array of TFLREUnicodeCharClassRange;
 
@@ -5696,71 +9394,81 @@ begin
 end;
 
 procedure TFLREUnicodeCharClass.AddUnicodeCategory(CategoryFlags:longword;IgnoreCase:boolean=false);
-var Value,LowValue,HighValue,Index:longword;
+var Range:longint;
+    UnicodeCharRanges:PFLREUnicodeCharRanges;
+    Bits,Category:longword;
 begin
- LowValue:=$ffffffff;
- HighValue:=0;
- for Value:=0 to $10ffff do begin
-  Index:=Value shr FLREUnicodeCategoryArrayBlockBits;
-  if (CategoryFlags and (1 shl FLREUnicodeCategoryArrayBlockData[FLREUnicodeCategoryArrayIndexBlockData[FLREUnicodeCategoryArrayIndexIndexData[Index shr FLREUnicodeCategoryArrayIndexBlockBits],Index and FLREUnicodeCategoryArrayIndexBlockMask],Value and FLREUnicodeCategoryArrayBlockMask]))<>0 then begin
-   if LowValue<=HighValue then begin
-    if (HighValue+1)=Value then begin
-     HighValue:=Value;
-    end else begin
-     AddRange(LowValue,HighValue,IgnoreCase);
-     LowValue:=Value;
-     HighValue:=Value;
+ Bits:=CategoryFlags;
+ while Bits<>0 do begin
+  Category:=PopFirstOneBit(Bits);
+  if Category<FLREUnicodeCategoryCount then begin
+   if IgnoreCase then begin
+    UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeIgnoreCaseCategoryBlocksData[Category]);
+    for Range:=0 to FLREUnicodeIgnoreCaseCategoryBlocksCounts[Category]-1 do begin
+     AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
     end;
    end else begin
-    LowValue:=Value;
-    HighValue:=Value;
+    UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeCategoryBlocksData[Category]);
+    for Range:=0 to FLREUnicodeCategoryBlocksCounts[Category]-1 do begin
+     AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+    end;
    end;
   end;
- end;
- if LowValue<=HighValue then begin
-  AddRange(LowValue,HighValue,IgnoreCase);
  end;
 end;
 
 procedure TFLREUnicodeCharClass.AddUnicodeScript(Script:longword;IgnoreCase:boolean=false);
-var Value,LowValue,HighValue,Index:longword;
+var Range:longint;
+    UnicodeCharRanges:PFLREUnicodeCharRanges;
 begin
- LowValue:=$ffffffff;
- HighValue:=0;
- for Value:=0 to $10ffff do begin
-  Index:=Value shr FLREUnicodeScriptArrayBlockBits;
-  if Script=FLREUnicodeScriptArrayBlockData[FLREUnicodeScriptArrayIndexBlockData[FLREUnicodeScriptArrayIndexIndexData[Index shr FLREUnicodeScriptArrayIndexBlockBits],Index and FLREUnicodeScriptArrayIndexBlockMask],Value and FLREUnicodeScriptArrayBlockMask] then begin
-   if LowValue<=HighValue then begin
-    if (HighValue+1)=Value then begin
-     HighValue:=Value;
-    end else begin
-     AddRange(LowValue,HighValue,IgnoreCase);
-     LowValue:=Value;
-     HighValue:=Value;
-    end;
-   end else begin
-    LowValue:=Value;
-    HighValue:=Value;
+ if Script<FLREUnicodeScriptCount then begin
+  if IgnoreCase then begin
+   UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeIgnoreCaseScriptBlocksData[Script]);
+   for Range:=0 to FLREUnicodeIgnoreCaseScriptBlocksCounts[Script]-1 do begin
+    AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+   end;
+  end else begin
+   UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeScriptBlocksData[Script]);
+   for Range:=0 to FLREUnicodeScriptBlocksCounts[Script]-1 do begin
+    AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
    end;
   end;
- end;
- if LowValue<=HighValue then begin
-  AddRange(LowValue,HighValue,IgnoreCase);
  end;
 end;
 
 procedure TFLREUnicodeCharClass.AddUnicodeBlock(Block:longword;IgnoreCase:boolean=false);
+var Range:longint;
+    UnicodeCharRanges:PFLREUnicodeCharRanges;
 begin
- AddRange(FLREUnicodeBlocks[Block].FromChar,FLREUnicodeBlocks[Block].ToChar,IgnoreCase);
+ if Block<FLREUnicodeBlockCount then begin
+  if IgnoreCase then begin
+   UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeIgnoreCaseBlockBlocksData[Block]);
+   for Range:=0 to FLREUnicodeIgnoreCaseBlockBlocksCounts[Block]-1 do begin
+    AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+   end;
+  end else begin
+   UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeBlockBlocksData[Block]);
+   for Range:=0 to FLREUnicodeBlockBlocksCounts[Block]-1 do begin
+    AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+   end;
+  end;
+ end;
 end;
 
 procedure TFLREUnicodeCharClass.AddUnicodeAdditionalBlock(Block:longword;IgnoreCase:boolean=false);
 var Range:longint;
     UnicodeCharRanges:PFLREUnicodeCharRanges;
 begin
- for Range:=0 to FLREUnicodeAdditionalBlocksCounts[Block]-1 do begin
+ if IgnoreCase then begin
+  UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeIgnoreCaseAdditionalBlocksData[Block]);
+  for Range:=0 to FLREUnicodeIgnoreCaseAdditionalBlocksCounts[Block]-1 do begin
+   AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+  end;
+ end else begin
   UnicodeCharRanges:=PFLREUnicodeCharRanges(FLREUnicodeAdditionalBlocksData[Block]);
-  AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],IgnoreCase);
+  for Range:=0 to FLREUnicodeAdditionalBlocksCounts[Block]-1 do begin
+   AddRange(UnicodeCharRanges^[Range,0],UnicodeCharRanges^[Range,1],false);
+  end;
  end;
 end;
 
@@ -6170,12 +9878,12 @@ begin
  Range:=First;
  while assigned(Range) and (Range.Lo<256) do begin
   if Range.Lo=Range.Hi then begin
-   System.Include(CharSet,ansichar(byte(Range.Lo)));
+   System.Include(CharSet,TFLRERawByteChar(byte(Range.Lo)));
   end else begin
    if Range.Hi<256 then begin
-    CharSet:=CharSet+[ansichar(byte(Range.Lo))..ansichar(byte(Range.Hi))];
+    CharSet:=CharSet+[TFLRERawByteChar(byte(Range.Lo))..TFLRERawByteChar(byte(Range.Hi))];
    end else begin
-    CharSet:=CharSet+[ansichar(byte(Range.Lo))..#$ff];
+    CharSet:=CharSet+[TFLRERawByteChar(byte(Range.Lo))..#$ff];
    end;
   end;
   Range:=Range.Next;
@@ -6210,7 +9918,7 @@ begin
    exit;
   end else begin
    if c<256 then begin
-    result:=ansichar(byte(c)) in CharSet;
+    result:=TFLRERawByteChar(byte(c)) in CharSet;
    end else begin
     repeat
      if (c>=Range.Lo) and (c<=Range.Hi) then begin
@@ -7031,7 +10739,7 @@ begin
    break;
   end;
   if CurrentPosition<LocalInputLength then begin
-   CurrentChar:=byte(ansichar(LocalInput[CurrentPosition]));
+   CurrentChar:=byte(TFLRERawByteChar(LocalInput[CurrentPosition]));
   end else begin
    CurrentChar:=-1;
   end;
@@ -7060,7 +10768,7 @@ begin
       end;
      end;
      opCHAR:begin
-      if (CurrentChar>=0) and (ansichar(byte(CurrentChar)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^) then begin
+      if (CurrentChar>=0) and (TFLRERawByteChar(byte(CurrentChar)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^) then begin
        AddThread(NewThreadList,Instruction^.Next,State,CurrentPosition+1);
       end else begin
        StateRelease(State);
@@ -7221,7 +10929,7 @@ begin
 
  while CurrentPosition<UntilExcludingPosition do begin
  
-  Condition:=State^.Action[LocalByteMap^[byte(ansichar(LocalInput[CurrentPosition]))]];
+  Condition:=State^.Action[LocalByteMap^[byte(TFLRERawByteChar(LocalInput[CurrentPosition]))]];
   MatchCondition:=NextMatchCondition;
 
   if ((Condition and sfEmptyAllFlags)=0) or
@@ -7420,7 +11128,7 @@ var LocalInputLength,BasePosition,Len:longint;
       // Match against nothing
      end;
      opSINGLECHAR:begin
-      if (Position<LocalInputLength) and (byte(ansichar(LocalInput[Position]))=Instruction^.Value) then begin
+      if (Position<LocalInputLength) and (byte(TFLRERawByteChar(LocalInput[Position]))=Instruction^.Value) then begin
        inc(Position);
        Instruction:=Instruction^.Next;
        if ShouldVisit(Instruction,Position) then begin
@@ -7635,8 +11343,8 @@ begin
  StatePoolFree:=nil;
  StatePoolSize:=0;
  StatePoolSizePowerOfTwo:=0;
- FillChar(DefaultStates,SizeOf(DefaultStates),AnsiChar(#0));
- FillChar(StartStates,SizeOf(StartStates),AnsiChar(#0));
+ FillChar(DefaultStates,SizeOf(DefaultStates),#0);
+ FillChar(StartStates,SizeOf(StartStates),#0);
 
  for Index:=0 to 255 do begin
   ByteMap[Index]:=Instance.ByteMap[Index];
@@ -7664,8 +11372,8 @@ begin
 
   AllocateNewStatePool;
 
-  FillChar(TemporaryState,SizeOf(TFLREDFAState),AnsiChar(#0));
-  FillChar(NewState,SizeOf(TFLREDFAState),AnsiChar(#0));
+  FillChar(TemporaryState,SizeOf(TFLREDFAState),#0);
+  FillChar(NewState,SizeOf(TFLREDFAState),#0);
 
   InstructionGenerations:=nil;
 
@@ -7678,7 +11386,7 @@ begin
 
   inc(Generation);
   GetMem(DFAState,StateSize);
-  FillChar(DFAState^,StateSize,AnsiChar(#0));
+  FillChar(DFAState^,StateSize,#0);
   DFAState^.Flags:=sfDFADead;
   StateCache.Add(DFAState);
   inc(CountStatesCached);
@@ -7686,7 +11394,7 @@ begin
 
   inc(Generation);
   GetMem(DFAState,StateSize);
-  FillChar(DFAState^,StateSize,AnsiChar(#0));
+  FillChar(DFAState^,StateSize,#0);
   DFAState^.Flags:=sfDFAFullMatch;
   StateCache.Add(DFAState);
   inc(CountStatesCached);
@@ -7696,7 +11404,7 @@ begin
 
    inc(Generation);
    GetMem(DFAState,StateSize);
-   FillChar(DFAState^,StateSize,AnsiChar(#0));
+   FillChar(DFAState^,StateSize,#0);
    FastAddInstructionThread(DFAState,Instance.AnchoredStartInstruction);
    StateCache.Add(DFAState);
    inc(CountStatesCached);
@@ -7704,7 +11412,7 @@ begin
 
    inc(Generation);
    GetMem(DFAState,StateSize);
-   FillChar(DFAState^,StateSize,AnsiChar(#0));
+   FillChar(DFAState^,StateSize,#0);
    FastAddInstructionThread(DFAState,Instance.UnanchoredStartInstruction);
    if fifDFAFastBeginningSearch in Instance.InternalFlags then begin
     DFAState.Flags:=DFAState.Flags or sfDFAStart;
@@ -7715,7 +11423,7 @@ begin
 
    inc(Generation);
    GetMem(DFAState,StateSize);
-   FillChar(DFAState^,StateSize,AnsiChar(#0));
+   FillChar(DFAState^,StateSize,#0);
    FastAddInstructionThread(DFAState,Instance.ReversedStartInstruction);
    StateCache.Add(DFAState);
    inc(CountStatesCached);
@@ -7839,7 +11547,7 @@ begin
    FreeState(State);
    inc(ptruint(State),StateSize);
   end;
-  FillChar(Pool^.States^,StatePoolSize,AnsiChar(#0));
+  FillChar(Pool^.States^,StatePoolSize,#0);
   Pool^.Next:=StatePoolFree;
   StatePoolFree:=Pool;
   Pool:=NextPool;
@@ -7853,9 +11561,9 @@ begin
   StatePoolFree:=result^.Next;
  end else begin
   GetMem(result,SizeOf(TFLREDFAStatePool));
-  FillChar(result^,SizeOf(TFLREDFAStatePool),AnsiChar(#0));
+  FillChar(result^,SizeOf(TFLREDFAStatePool),#0);
   GetMem(result^.States,StatePoolSizePowerOfTwo);
-  FillChar(result^.States^,StatePoolSize,AnsiChar(#0));
+  FillChar(result^.States^,StatePoolSize,#0);
   result^.EndState:=pointer(ptruint(ptruint(result^.States)+ptruint(StatePoolSize)));
  end;
  result^.Next:=StatePoolUsed;
@@ -7890,7 +11598,7 @@ begin
   if assigned(StatePoolUsed) and
      ((ptruint(ptruint(State)-ptruint(StatePoolUsed^.States))<StatePoolSize) and
       (pointer(ptruint(ptruint(StatePoolUsed^.NextState)-ptruint(StateSize)))=State)) then begin
-   FillChar(State^,StateSize,AnsiChar(#0));
+   FillChar(State^,StateSize,#0);
    dec(ptruint(StatePoolUsed^.NextState),StateSize);
   end;
  end;
@@ -7913,13 +11621,13 @@ begin
  for Index:=0 to length(DefaultStates)-1 do begin
   State:=DefaultStates[Index];
   if assigned(State) then begin
-   FillChar(State^.NextStates,NextStatesSize,AnsiChar(#0));
+   FillChar(State^.NextStates,NextStatesSize,#0);
    StateCache.Add(State);
    inc(CountStatesCached);
   end;
  end;
 
- FillChar(StartStates,SizeOf(StartStates),AnsiChar(#0));
+ FillChar(StartStates,SizeOf(StartStates),#0);
 
  HadReset:=true;
 
@@ -7973,7 +11681,7 @@ begin
  end;
 end;
 
-function TFLREDFA.FastProcessNextState(State:PFLREDFAState;const CurrentChar:ansichar):PFLREDFAState; {$ifdef cpu386}register;{$endif}
+function TFLREDFA.FastProcessNextState(State:PFLREDFAState;const CurrentChar:TFLRERawByteChar):PFLREDFAState; {$ifdef cpu386}register;{$endif}
 var Counter:longint;        
     Instruction:PFLREInstruction;
 begin
@@ -7997,7 +11705,7 @@ begin
     // Match against nothing
    end;
    opSINGLECHAR:begin
-    if byte(ansichar(CurrentChar))=Instruction^.Value then begin
+    if byte(TFLRERawByteChar(CurrentChar))=Instruction^.Value then begin
      FastAddInstructionThread(@NewState,Instruction^.Next);
     end;
    end;
@@ -8036,7 +11744,7 @@ begin
 
  if not HadReset then begin
   // Connect the last state to the new state with the current char
-  State.NextStates[Instance.ByteMap[byte(ansichar(CurrentChar))]]:=result;
+  State.NextStates[Instance.ByteMap[byte(TFLRERawByteChar(CurrentChar))]]:=result;
  end;
 
 end;
@@ -8194,7 +11902,7 @@ begin
  Position:=StartPosition;
  while Position<UntilExcludingPosition do begin
   LastState:=State;
-  State:=State^.NextStates[LocalByteMap[byte(ansichar(LocalInput[Position]))]];
+  State:=State^.NextStates[LocalByteMap[byte(TFLRERawByteChar(LocalInput[Position]))]];
   inc(Position);
   if not assigned(State) then begin
    State:=FastProcessNextState(LastState,LocalInput[Position-1]);
@@ -8216,7 +11924,7 @@ begin
    end;
    if (State^.Flags and sfDFAStart)<>0 then begin
     if Position<UntilExcludingPosition then begin
-     TemporaryTestState:=State^.NextStates[LocalByteMap[byte(ansichar(LocalInput[Position]))]];
+     TemporaryTestState:=State^.NextStates[LocalByteMap[byte(TFLRERawByteChar(LocalInput[Position]))]];
      if assigned(TemporaryTestState) and ((TemporaryTestState^.Flags and sfDFAStart)<>0) then begin
       Offset:=Instance.SearchNextPossibleStartForDFA(@LocalInput[Position],UntilExcludingPosition-Position);
       if Offset<0 then begin
@@ -8343,7 +12051,7 @@ begin
  end;
  for Position:=StartPosition downto UntilIncludingPosition do begin
   LastState:=State;
-  State:=State^.NextStates[LocalByteMap[byte(ansichar(LocalInput[Position]))]];
+  State:=State^.NextStates[LocalByteMap[byte(TFLRERawByteChar(LocalInput[Position]))]];
   if not assigned(State) then begin
    State:=FastProcessNextState(LastState,LocalInput[Position]);
    if not assigned(State) then begin
@@ -8588,7 +12296,7 @@ begin
      end;
     end;
     opCHAR:begin
-     if (CurrentChar<>256) and (ansichar(byte(CurrentChar)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^) then begin
+     if (CurrentChar<>256) and (TFLRERawByteChar(byte(CurrentChar)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^) then begin
       AddToWorkQueue(NewWorkQueue,Instruction^.Next,Flags);
      end;
     end;
@@ -8733,7 +12441,7 @@ begin
    Start:=sskBeginText;
    Flags:=sfEmptyBeginText or sfEmptyBeginLine;
   end else begin
-   if (rfUTF8 in Instance.Flags) and ((byte(ansichar(LocalInput[StartPosition])) and $80)<>0) then begin
+   if (rfUTF8 in Instance.Flags) and ((byte(TFLRERawByteChar(LocalInput[StartPosition])) and $80)<>0) then begin
     NextPosition:=StartPosition;
     UTF8PtrSafeInc(LocalInput,LocalInputLength,NextPosition);
     if (NextPosition>=0) and (NextPosition<ThreadLocalStorageInstance.InputLength) then begin
@@ -8742,7 +12450,7 @@ begin
      NextChar:=$ffffffff;
     end;
    end else begin
-    NextChar:=byte(ansichar(LocalInput[StartPosition+1]));
+    NextChar:=byte(TFLRERawByteChar(LocalInput[StartPosition+1]));
    end;
    case NextChar of
     $0a,$0d,$85,$2028,$2029:begin
@@ -8779,7 +12487,7 @@ begin
      PreviousChar:=$ffffffff;
     end;
    end else begin
-    PreviousChar:=byte(ansichar(LocalInput[StartPosition-1]));
+    PreviousChar:=byte(TFLRERawByteChar(LocalInput[StartPosition-1]));
    end;
    case PreviousChar of
     $0a,$0d,$85,$2028,$2029:begin
@@ -8964,7 +12672,7 @@ begin
  end;
  ProcessNewStartState:
   if Position<UntilExcludingPosition then begin
-   TemporaryTestState:=State^.NextStates[LocalByteMap^[byte(ansichar(LocalInput[Position]))]];
+   TemporaryTestState:=State^.NextStates[LocalByteMap^[byte(TFLRERawByteChar(LocalInput[Position]))]];
    if assigned(TemporaryTestState) and ((TemporaryTestState^.Flags and sfDFAStart)<>0) then begin
     Offset:=Instance.SearchNextPossibleStartForDFA(@LocalInput[Position],UntilExcludingPosition-Position);
     if Offset<0 then begin
@@ -8982,7 +12690,7 @@ begin
  SkipProcessNewStartState:
 {$else}
  while Position<UntilExcludingPosition do begin
-  CurrentChar:=byte(ansichar(LocalInput[Position]));
+  CurrentChar:=byte(TFLRERawByteChar(LocalInput[Position]));
   inc(Position);
   LastState:=State;
 //write(chr(CurrentChar),' ',LocalByteMap^[CurrentChar],' ');
@@ -9015,7 +12723,7 @@ begin
    end;
    if (State^.Flags and sfDFAStart)<>0 then begin
     if Position<UntilExcludingPosition then begin
-     TemporaryTestState:=State^.NextStates[LocalByteMap^[byte(ansichar(LocalInput[Position]))]];
+     TemporaryTestState:=State^.NextStates[LocalByteMap^[byte(TFLRERawByteChar(LocalInput[Position]))]];
      if assigned(TemporaryTestState) and ((TemporaryTestState^.Flags and sfDFAStart)<>0) then begin
       Offset:=Instance.SearchNextPossibleStartForDFA(@LocalInput[Position],UntilExcludingPosition-Position);
       if Offset<0 then begin
@@ -9037,7 +12745,7 @@ begin
  Position:=UntilExcludingPosition;
 
  if (Position>=0) and (Position<LocalInputLength) then begin
-  CurrentChar:=byte(ansichar(LocalInput[Position]));
+  CurrentChar:=byte(TFLRERawByteChar(LocalInput[Position]));
  end else begin
   CurrentChar:=256;
  end;
@@ -9210,7 +12918,7 @@ begin
  end;
 {$else}
  for Position:=StartPosition downto UntilExcludingPosition do begin
-  CurrentChar:=byte(ansichar(LocalInput[Position]));
+  CurrentChar:=byte(TFLRERawByteChar(LocalInput[Position]));
   LastState:=State;
   State:=State^.NextStates[LocalByteMap^[CurrentChar]];
   if not assigned(State) then begin
@@ -9243,7 +12951,7 @@ begin
  Position:=UntilExcludingPosition-1;
 
  if (Position>=0) and (Position<LocalInputLength) then begin
-  CurrentChar:=byte(ansichar(LocalInput[Position]));
+  CurrentChar:=byte(TFLRERawByteChar(LocalInput[Position]));
  end else begin
   CurrentChar:=256;
  end;
@@ -9365,12 +13073,12 @@ begin
  end else begin
   PreviousPosition:=Position-1;
   if (PreviousPosition>=0) and (PreviousPosition<InputLength) then begin
-   PreviousChar:=byte(ansichar(Input[PreviousPosition]));
+   PreviousChar:=byte(TFLRERawByteChar(Input[PreviousPosition]));
   end else begin
    PreviousChar:=0;
   end;
   if (Position>=0) and (Position<InputLength) then begin
-   CurrentChar:=byte(ansichar(Input[Position]));
+   CurrentChar:=byte(TFLRERawByteChar(Input[Position]));
   end else begin
    CurrentChar:=0;
   end;
@@ -9472,7 +13180,7 @@ begin
      CapturePosition:=CaptureStart;
      BackReferencePosition:=BackReferenceStart;
      while (CapturePosition<CaptureEnd) and (BackReferencePosition<BackReferenceEnd) do begin
-      if UnicodeToLower(byte(ansichar(Input[CapturePosition])))<>UnicodeToLower(byte(ansichar(Input[BackReferencePosition]))) then begin
+      if UnicodeToLower(byte(TFLRERawByteChar(Input[CapturePosition])))<>UnicodeToLower(byte(TFLRERawByteChar(Input[BackReferencePosition]))) then begin
        result:=false;
        exit;
       end;
@@ -9501,7 +13209,7 @@ end;
 
 constructor TFLRE.Create(const ARegularExpression:TFLRERawByteString;const AFlags:TFLREFlags=[rfDELIMITERS]);
 const EmptyString:pansichar='';
-var StartDelimiter,EndDelimiter:ansichar;
+var StartDelimiter,EndDelimiter:TFLRERawByteChar;
     Index,SubIndex:longint;
     FlagsStr:TFLRERawByteString;
     ThreadLocalStorageInstance:TFLREThreadLocalStorageInstance;
@@ -9549,6 +13257,15 @@ begin
  FixedStringBoyerMooreSkip:=nil;
 
  PrefixPatternBitMasks:=nil;
+
+ FirstPrefixCharClass:=nil;
+ FirstPrefixCharClassSize:=0;
+ FirstPrefixCharClassRepeatedCount:=0;
+
+ FirstPrefixCharRanges:=nil;
+ CountFirstPrefixCharRanges:=0;
+
+ FirstPrefixCharClassChars:=nil;
 
  RegularExpression:=ARegularExpression;
 
@@ -9648,6 +13365,13 @@ begin
       raise EFLRE.Create('Too many longest regular expression modifier flags');
      end else begin
       Include(Flags,rfLONGEST);
+     end;
+    end;
+    'o':begin
+     if rfONLYFASTOPTIMIZATIONS in Flags then begin
+      raise EFLRE.Create('Too many only fast optimization regular expression modifier flags');
+     end else begin
+      Include(Flags,rfONLYFASTOPTIMIZATIONS);
      end;
     end;
     else begin
@@ -9803,6 +13527,14 @@ begin
  if assigned(PrefixPatternBitMasks) then begin
   FreeMem(PrefixPatternBitMasks);
  end;
+
+ if assigned(FirstPrefixCharClass) then begin
+  FreeMem(FirstPrefixCharClass);
+ end;
+
+ SetLength(FirstPrefixCharRanges,0);
+
+ SetLength(FirstPrefixCharClassChars,0);
 
  SetLength(CapturesToSubMatchesMap,0);
 
@@ -10034,7 +13766,7 @@ begin
 end;
 
 function TFLRE.Concat(NodeLeft,NodeRight:PFLRENode):PFLRENode;
-begin                                                    
+begin
  if assigned(NodeLeft) and assigned(NodeRight) then begin
   if (NodeLeft^.NodeType=ntZEROWIDTH) and (NodeRight^.NodeType=ntZEROWIDTH) then begin
    NodeLeft^.Value:=NodeLeft^.Value or NodeRight^.Value;
@@ -10066,44 +13798,46 @@ begin
   end else begin
    result:=nil;
   end;
- end;              
- while (assigned(result) and (result^.NodeType=ntCAT)) and (assigned(result^.Left) and assigned(result^.Right)) do begin
-  if (result^.Left^.NodeType=ntCAT) and (result^.Right^.NodeType=ntZEROWIDTH) and assigned(result^.Left^.Right) and (result^.Left^.Right^.NodeType=ntZEROWIDTH) then begin
-   result^.Left^.Right^.Value:=result^.Left^.Right^.Value or result^.Right^.Value;
-   result:=result^.Left;
-   continue;
-  end else if (result^.Left^.NodeType=ntZEROWIDTH) and (result^.Right^.NodeType=ntCAT) and assigned(result^.Right^.Left) and (result^.Right^.Left^.NodeType=ntZEROWIDTH) then begin
-   result^.Right^.Left^.Value:=result^.Right^.Left^.Value or result^.Left^.Value;
-   result:=result^.Right;
-   continue;
-  end else if (result^.Left^.NodeType=ntCAT) and (result^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and assigned(result^.Left^.Right) and (result^.Right^.Value=0) then begin
-   if ((result^.Left^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Right^.Left,result^.Right^.Left) then begin
-    result^.Left^.Right:=result^.Right;
+ end;
+ if not (rfONLYFASTOPTIMIZATIONS in Flags) then begin
+  while (assigned(result) and (result^.NodeType=ntCAT)) and (assigned(result^.Left) and assigned(result^.Right)) do begin
+   if (result^.Left^.NodeType=ntCAT) and (result^.Right^.NodeType=ntZEROWIDTH) and assigned(result^.Left^.Right) and (result^.Left^.Right^.NodeType=ntZEROWIDTH) then begin
+    result^.Left^.Right^.Value:=result^.Left^.Right^.Value or result^.Right^.Value;
     result:=result^.Left;
     continue;
-   end else if ((result^.Left^.Right^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Right^.Left,result^.Right^.Left) then begin
-    result:=result^.Left;
-    continue;
-   end;
-  end else if (result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntCAT) and assigned(result^.Right^.Left) and (result^.Left^.Value=0) then begin
-   if ((result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.Left^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left^.Left) and (result^.Right^.Left^.Value=0) then begin
+   end else if (result^.Left^.NodeType=ntZEROWIDTH) and (result^.Right^.NodeType=ntCAT) and assigned(result^.Right^.Left) and (result^.Right^.Left^.NodeType=ntZEROWIDTH) then begin
+    result^.Right^.Left^.Value:=result^.Right^.Left^.Value or result^.Left^.Value;
     result:=result^.Right;
     continue;
-   end else if ((result^.Left^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.Left^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left^.Left) and (result^.Right^.Left^.Value=0) then begin
-    result^.Right^.Left:=result^.Left;
-    result:=result^.Right;
-    continue;
+   end else if (result^.Left^.NodeType=ntCAT) and (result^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and assigned(result^.Left^.Right) and (result^.Right^.Value=0) then begin
+    if ((result^.Left^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Right^.Left,result^.Right^.Left) then begin
+     result^.Left^.Right:=result^.Right;
+     result:=result^.Left;
+     continue;
+    end else if ((result^.Left^.Right^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Right^.Left,result^.Right^.Left) then begin
+     result:=result^.Left;
+     continue;
+    end;
+   end else if (result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntCAT) and assigned(result^.Right^.Left) and (result^.Left^.Value=0) then begin
+    if ((result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.Left^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left^.Left) and (result^.Right^.Left^.Value=0) then begin
+     result:=result^.Right;
+     continue;
+    end else if ((result^.Left^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.Left^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left^.Left) and (result^.Right^.Left^.Value=0) then begin
+     result^.Right^.Left:=result^.Left;
+     result:=result^.Right;
+     continue;
+    end;
+   end else if (result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Left^.Value=0) and (result^.Right^.Value=0) then begin
+    if ((result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left) then begin
+     result:=result^.Right;
+     continue;
+    end else if ((result^.Left^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left) then begin
+     result:=result^.Left;
+     continue;
+    end;
    end;
-  end else if (result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Left^.Value=0) and (result^.Right^.Value=0) then begin
-   if ((result^.Left^.NodeType in [ntSTAR,ntPLUS,ntQUEST]) and (result^.Right^.NodeType=ntPLUS)) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left) then begin
-    result:=result^.Right;
-    continue;
-   end else if ((result^.Left^.NodeType in [ntSTAR,ntPLUS]) and (result^.Right^.NodeType in [ntSTAR,ntQUEST])) and AreNodesEqualSafe(result^.Left^.Left,result^.Right^.Left) then begin
-    result:=result^.Left;
-    continue;
-   end;
+   break;
   end;
-  break;
  end;
 end;
 
@@ -10117,7 +13851,7 @@ var NodeEx,pl,pr:PPFLRENode;
     Node,l,r:PFLRENode;
 begin
  if assigned(NodeLeft) and assigned(NodeRight) then begin
-  if (NodeLeft^.NodeType=ntCAT) and (NodeRight^.NodeType=ntCAT) then begin
+  if (NodeLeft^.NodeType=ntCAT) and (NodeRight^.NodeType=ntCAT) and not (rfONLYFASTOPTIMIZATIONS in Flags) then begin
    result:=NewNode(ntALT,NodeLeft,NodeRight,0);
    NodeEx:=@result;
    while (((assigned(NodeEx) and assigned(NodeEx^)) and (NodeEx^^.NodeType=ntALT)) and (assigned(NodeEx^^.Left) and assigned(NodeEx^^.Right))) and ((NodeEx^^.Left^.NodeType=ntCAT) and (NodeEx^^.Right^.NodeType=ntCAT)) do begin
@@ -10745,17 +14479,17 @@ var SourcePosition,SourceLength:longint;
     GroupIndexIntegerStack:TFLREIntegerList;
     GroupNameStringStack:TStringList;
     BackReferenceComparisonGroup:boolean;
- function Hex2Value(const c:ansichar):longword;
+ function Hex2Value(const c:TFLRERawByteChar):longword;
  begin
   case c of
    '0'..'9':begin
-    result:=byte(ansichar(c))-byte(ansichar('0'))
+    result:=byte(TFLRERawByteChar(c))-byte(TFLRERawByteChar('0'))
    end;
    'a'..'f':begin
-    result:=(byte(ansichar(c))-byte(ansichar('a')))+$a;
+    result:=(byte(TFLRERawByteChar(c))-byte(TFLRERawByteChar('a')))+$a;
    end;
    'A'..'F':begin
-    result:=(byte(ansichar(c))-byte(ansichar('A')))+$a;
+    result:=(byte(TFLRERawByteChar(c))-byte(TFLRERawByteChar('A')))+$a;
    end;
    else begin
     result:=0;
@@ -11141,7 +14875,7 @@ var SourcePosition,SourceLength:longint;
   if (rfUTF8 in Flags) and (UnicodeChar>=$80) then begin
    result:=NewUnicodeChar(UnicodeChar);
   end else if UnicodeChar<=$ff then begin
-   result:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(UnicodeChar))],true));
+   result:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(UnicodeChar))],true));
   end else begin
    raise EFLRE.Create('Syntax error');
   end;
@@ -11155,18 +14889,18 @@ var SourcePosition,SourceLength:longint;
    if (rfUTF8 in Flags) and ((LowerCaseUnicodeChar>=$80) or (UpperCaseUnicodeChar>=$80)) then begin
     result:=NewAlt(NewCharEx(LowerCaseUnicodeChar),NewCharEx(UpperCaseUnicodeChar));
    end else begin
-    result:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(LowerCaseUnicodeChar)),ansichar(byte(UpperCaseUnicodeChar))],true));
+    result:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(LowerCaseUnicodeChar)),TFLRERawByteChar(byte(UpperCaseUnicodeChar))],true));
    end;
   end else begin
    if (rfUTF8 in Flags) and (UnicodeChar>=$80) then begin
     result:=NewCharEx(UnicodeChar);
    end else begin
-    result:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(UnicodeChar))],true));
+    result:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(UnicodeChar))],true));
    end;
   end;
  end;
  function CompileUTF8Range(Lo,Hi:longword):PFLRENode;
- type TString6Chars=array[0..6] of ansichar;
+ type TString6Chars=array[0..6] of TFLRERawByteChar;
  const Seq0010ffff:array[0..6,0..4,0..1] of longint=((($00,$7f),(-1,-1),(-1,-1),(-1,-1),(-1,-1)),        // 00-7F
                                                      (($c2,$df),($80,$bf),(-1,-1),(-1,-1),(-1,-1)),      // C2-DF 80-BF
                                                      (($e0,$e0),($a0,$bf),($80,$bf),(-1,-1),(-1,-1)),    // E0-E0 A0-BF 80-BF
@@ -11200,47 +14934,47 @@ var SourcePosition,SourceLength:longint;
   begin
    case CharValue of
     $00000000..$0000007f:begin
-     result[0]:=ansichar(byte(1));
-     result[1]:=ansichar(byte(CharValue));
+     result[0]:=TFLRERawByteChar(byte(1));
+     result[1]:=TFLRERawByteChar(byte(CharValue));
     end;
     $00000080..$000007ff:begin
-     result[0]:=ansichar(byte(2));
-     result[1]:=ansichar(byte($c0 or ((CharValue shr 6) and $1f)));
-     result[2]:=ansichar(byte($80 or (CharValue and $3f)));
+     result[0]:=TFLRERawByteChar(byte(2));
+     result[1]:=TFLRERawByteChar(byte($c0 or ((CharValue shr 6) and $1f)));
+     result[2]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     end;
  // {$ifdef PLREStrictUTF8}$00000800..$0000d7ff,$0000e000..$0000ffff{$else}$00000800..$0000ffff{$endif}:begin
     $00000800..$0000ffff:begin
-     result[0]:=ansichar(byte(3));
-     result[1]:=ansichar(byte($e0 or ((CharValue shr 12) and $0f)));
-     result[2]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-     result[3]:=ansichar(byte($80 or (CharValue and $3f)));
+     result[0]:=TFLRERawByteChar(byte(3));
+     result[1]:=TFLRERawByteChar(byte($e0 or ((CharValue shr 12) and $0f)));
+     result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+     result[3]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     end;
     $00010000..$0010ffff:begin
-     result[0]:=ansichar(byte(4));
-     result[1]:=ansichar(byte($f0 or ((CharValue shr 18) and $07)));
-     result[2]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-     result[3]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-     result[4]:=ansichar(byte($80 or (CharValue and $3f)));
+     result[0]:=TFLRERawByteChar(byte(4));
+     result[1]:=TFLRERawByteChar(byte($f0 or ((CharValue shr 18) and $07)));
+     result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+     result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+     result[4]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     end;
     $00200000..$03ffffff:begin
-     result[0]:=ansichar(byte(5));
-     result[1]:=ansichar(byte($f8 or ((CharValue shr 24) and $03)));
-     result[2]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-     result[3]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-     result[4]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-     result[5]:=ansichar(byte($80 or (CharValue and $3f)));
+     result[0]:=TFLRERawByteChar(byte(5));
+     result[1]:=TFLRERawByteChar(byte($f8 or ((CharValue shr 24) and $03)));
+     result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+     result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+     result[4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+     result[5]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     end;
     $04000000..$7fffffff:begin
-     result[0]:=ansichar(byte(6));
-     result[1]:=ansichar(byte($fc or ((CharValue shr 30) and $01)));
-     result[2]:=ansichar(byte($80 or ((CharValue shr 24) and $3f)));
-     result[3]:=ansichar(byte($80 or ((CharValue shr 18) and $3f)));
-     result[4]:=ansichar(byte($80 or ((CharValue shr 12) and $3f)));
-     result[5]:=ansichar(byte($80 or ((CharValue shr 6) and $3f)));
-     result[6]:=ansichar(byte($80 or (CharValue and $3f)));
+     result[0]:=TFLRERawByteChar(byte(6));
+     result[1]:=TFLRERawByteChar(byte($fc or ((CharValue shr 30) and $01)));
+     result[2]:=TFLRERawByteChar(byte($80 or ((CharValue shr 24) and $3f)));
+     result[3]:=TFLRERawByteChar(byte($80 or ((CharValue shr 18) and $3f)));
+     result[4]:=TFLRERawByteChar(byte($80 or ((CharValue shr 12) and $3f)));
+     result[5]:=TFLRERawByteChar(byte($80 or ((CharValue shr 6) and $3f)));
+     result[6]:=TFLRERawByteChar(byte($80 or (CharValue and $3f)));
     end;
     else begin
-     result[0]:=ansichar(byte(3));
+     result[0]:=TFLRERawByteChar(byte(3));
      result[1]:=#$ef;
      result[2]:=#$bf;
      result[3]:=#$bd;
@@ -11250,7 +14984,7 @@ var SourcePosition,SourceLength:longint;
   procedure AddRange(const Lo,Hi:byte);
   var Node:PFLRENode;
   begin
-   Node:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(Lo))..ansichar(byte(Hi))],true));
+   Node:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(Lo))..TFLRERawByteChar(byte(Hi))],true));
    Add(Node);
   end;
   procedure ProcessRange(Lo,Hi:longword);
@@ -11315,9 +15049,9 @@ var SourcePosition,SourceLength:longint;
       end;
       StrLo:=ToString(Lo);
       StrHi:=ToString(Hi);
-      if byte(ansichar(StrLo[0]))=byte(ansichar(StrHi[0])) then begin
-       for i:=1 to byte(ansichar(StrLo[0])) do begin
-        AddRange(byte(ansichar(StrLo[i])),byte(ansichar(StrHi[i])));
+      if byte(TFLRERawByteChar(StrLo[0]))=byte(TFLRERawByteChar(StrHi[0])) then begin
+       for i:=1 to byte(TFLRERawByteChar(StrLo[0])) do begin
+        AddRange(byte(TFLRERawByteChar(StrLo[i])),byte(TFLRERawByteChar(StrHi[i])));
        end;
        AddSuffix;
       end;
@@ -11365,12 +15099,12 @@ var SourcePosition,SourceLength:longint;
     Range:=UnicodeCharClass.First;
     while assigned(Range) and (Range.Lo<256) do begin
      if Range.Lo=Range.Hi then begin
-      Include(CharClass,ansichar(byte(Range.Lo)));
+      Include(CharClass,TFLRERawByteChar(byte(Range.Lo)));
      end else begin
       if Range.Hi<256 then begin
-       CharClass:=CharClass+[ansichar(byte(Range.Lo))..ansichar(byte(Range.Hi))];
+       CharClass:=CharClass+[TFLRERawByteChar(byte(Range.Lo))..TFLRERawByteChar(byte(Range.Hi))];
       end else begin
-       CharClass:=CharClass+[ansichar(byte(Range.Lo))..#$ff];
+       CharClass:=CharClass+[TFLRERawByteChar(byte(Range.Lo))..#$ff];
       end;
      end;
      Range:=Range.Next;
@@ -11494,7 +15228,7 @@ var SourcePosition,SourceLength:longint;
                                         FLREUnicodeClassHashMapSeedBits,
                                         FLREUnicodeClassHashMapValueBits,
                                         FLREUnicodeClassHashMapSize,
-                                        UTF32CharToUTF8(byte(ansichar(Source[SourcePosition]))));
+                                        UTF32CharToUTF8(byte(TFLRERawByteChar(Source[SourcePosition]))));
      if f>=0 then begin
       inc(SourcePosition);
       UnicodeCharClass.AddUnicodeCategory(f,IgnoreCase);
@@ -11546,7 +15280,7 @@ var SourcePosition,SourceLength:longint;
    if (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) then begin
     i:=0;
     while (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) do begin
-     i:=(i*10)+longint(byte(ansichar(Source[SourcePosition]))-byte(ansichar('0')));
+     i:=(i*10)+longint(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('0')));
      inc(SourcePosition);
     end;
     if i<>0 then begin
@@ -11681,10 +15415,10 @@ var SourcePosition,SourceLength:longint;
      if (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['a'..'z','A'..'Z']) then begin
       case Source[SourcePosition] of
        'a'..'z':begin
-        result.AddChar(byte(ansichar(Source[SourcePosition]))-byte(ansichar('a')),IgnoreCase);
+        result.AddChar(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('a')),IgnoreCase);
        end;
        'A'..'Z':begin
-        result.AddChar(byte(ansichar(Source[SourcePosition]))-byte(ansichar('A')),IgnoreCase);
+        result.AddChar(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('A')),IgnoreCase);
        end;
       end;
       result.Canonicalized:=IgnoreCase;
@@ -11755,11 +15489,11 @@ var SourcePosition,SourceLength:longint;
         result.AddChar(ord('\'),IgnoreCase);
        end;
       end else begin
-       if (rfUTF8 in Flags) and (byte(ansichar(Source[SourcePosition]))>=$80) then begin
+       if (rfUTF8 in Flags) and (byte(TFLRERawByteChar(Source[SourcePosition]))>=$80) then begin
         UnicodeChar:=UTF8CodeUnitGetCharAndIncFallback(Source,SourcePosition);
         result.AddChar(UnicodeChar,IgnoreCase);
        end else begin
-        result.AddChar(byte(ansichar(Source[SourcePosition])),IgnoreCase);
+        result.AddChar(byte(TFLRERawByteChar(Source[SourcePosition])),IgnoreCase);
         inc(SourcePosition);
        end;
       end;
@@ -11767,11 +15501,11 @@ var SourcePosition,SourceLength:longint;
      result.Canonicalized:=IgnoreCase;
     end;
     else begin
-     if (rfUTF8 in Flags) and (byte(ansichar(Source[SourcePosition]))>=$80) then begin
+     if (rfUTF8 in Flags) and (byte(TFLRERawByteChar(Source[SourcePosition]))>=$80) then begin
       UnicodeChar:=UTF8CodeUnitGetCharAndIncFallback(Source,SourcePosition);
       result.AddChar(UnicodeChar,IgnoreCase);
      end else begin
-      result.AddChar(byte(ansichar(Source[SourcePosition])),IgnoreCase);
+      result.AddChar(byte(TFLRERawByteChar(Source[SourcePosition])),IgnoreCase);
       inc(SourcePosition);
      end;
     end;
@@ -11796,10 +15530,10 @@ var SourcePosition,SourceLength:longint;
      end;
     end else begin
      result:=TFLREUnicodeCharClass.Create;
-     if (rfUTF8 in Flags) and (byte(ansichar(Source[SourcePosition]))>=$80) then begin
+     if (rfUTF8 in Flags) and (byte(TFLRERawByteChar(Source[SourcePosition]))>=$80) then begin
       result.AddChar(UTF8CodeUnitGetCharAndIncFallback(Source,SourcePosition));
      end else begin
-      result.AddChar(byte(ansichar(Source[SourcePosition])));
+      result.AddChar(byte(TFLRERawByteChar(Source[SourcePosition])));
       inc(SourcePosition);
      end;
     end;
@@ -12079,7 +15813,7 @@ var SourcePosition,SourceLength:longint;
     end else begin
      Value:=0;
     end;
-    inc(Value,byte(ansichar(Name[Index]))-byte(ansichar('0')));
+    inc(Value,byte(TFLRERawByteChar(Name[Index]))-byte(TFLRERawByteChar('0')));
    end else begin
     Value:=-1;
     break;
@@ -12125,7 +15859,7 @@ var SourcePosition,SourceLength:longint;
      OldFlags:TFLREFlags;
      Name,TemporaryString:TFLRERawByteString;
      TemporaryNode:PFLRENode;
-     TerminateChar:ansichar;
+     TerminateChar:TFLRERawByteChar;
  begin
   result:=nil;
   try
@@ -12409,10 +16143,10 @@ var SourcePosition,SourceLength:longint;
        if SourcePosition<=SourceLength then begin
         case Source[SourcePosition] of
          '0'..'9':begin
-          Value:=byte(ansichar(Source[SourcePosition]))-byte(ansichar('0'));
+          Value:=byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('0'));
           inc(SourcePosition);
           while (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) do begin
-           Value:=(Value*10)+(byte(ansichar(Source[SourcePosition]))-byte(ansichar('0')));
+           Value:=(Value*10)+(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('0')));
            inc(SourcePosition);
           end;
           result:=NewBackReferencePerIndex(Value,false);
@@ -12555,7 +16289,7 @@ var SourcePosition,SourceLength:longint;
           end;
          end;
          else begin
-          if (rfUTF8 in Flags) and (byte(ansichar(Source[SourcePosition]))>=$80) then begin
+          if (rfUTF8 in Flags) and (byte(TFLRERawByteChar(Source[SourcePosition]))>=$80) then begin
            UnicodeChar:=UTF8CodeUnitGetCharAndIncFallback(Source,SourcePosition);
            result:=NewUnicodeChar(UnicodeChar);
           end else begin
@@ -12608,10 +16342,10 @@ var SourcePosition,SourceLength:longint;
          end;
          else begin
           if (rfIGNORECASE in Flags) and (Source[SourcePosition] in ['a'..'z','A'..'Z']) then begin
-           UnicodeChar:=byte(ansichar(Source[SourcePosition]));
+           UnicodeChar:=byte(TFLRERawByteChar(Source[SourcePosition]));
            LowerCaseUnicodeChar:=UnicodeToLower(UnicodeChar);
            UpperCaseUnicodeChar:=UnicodeToUpper(UnicodeChar);
-           TemporaryNode:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(LowerCaseUnicodeChar)),ansichar(byte(UpperCaseUnicodeChar))],true));
+           TemporaryNode:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(LowerCaseUnicodeChar)),TFLRERawByteChar(byte(UpperCaseUnicodeChar))],true));
           end else begin
            TemporaryNode:=NewNode(ntCHAR,nil,nil,NewCharClass([Source[SourcePosition]],true));
            inc(SourcePosition);
@@ -12708,11 +16442,11 @@ var SourcePosition,SourceLength:longint;
       end;
       else begin
        if (rfIGNORECASE in Flags) and (Source[SourcePosition] in ['a'..'z','A'..'Z']) then begin
-        UnicodeChar:=byte(ansichar(Source[SourcePosition]));
+        UnicodeChar:=byte(TFLRERawByteChar(Source[SourcePosition]));
         inc(SourcePosition);
         LowerCaseUnicodeChar:=UnicodeToLower(UnicodeChar);
         UpperCaseUnicodeChar:=UnicodeToUpper(UnicodeChar);
-        result:=NewNode(ntCHAR,nil,nil,NewCharClass([ansichar(byte(LowerCaseUnicodeChar)),ansichar(byte(UpperCaseUnicodeChar))],true));
+        result:=NewNode(ntCHAR,nil,nil,NewCharClass([TFLRERawByteChar(byte(LowerCaseUnicodeChar)),TFLRERawByteChar(byte(UpperCaseUnicodeChar))],true));
        end else begin
         result:=NewNode(ntCHAR,nil,nil,NewCharClass([Source[SourcePosition]],true));
         inc(SourcePosition);
@@ -12806,7 +16540,7 @@ var SourcePosition,SourceLength:longint;
        if (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) then begin
         MinCount:=0;
         while (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) do begin
-         MinCount:=(MinCount*10)+(byte(ansichar(Source[SourcePosition]))-byte(ansichar('0')));
+         MinCount:=(MinCount*10)+(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('0')));
          inc(SourcePosition);
         end;
        end else begin
@@ -12818,7 +16552,7 @@ var SourcePosition,SourceLength:longint;
         if (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) then begin
          MaxCount:=0;
          while (SourcePosition<=SourceLength) and (Source[SourcePosition] in ['0'..'9']) do begin
-          MaxCount:=(MaxCount*10)+(byte(ansichar(Source[SourcePosition]))-byte(ansichar('0')));
+          MaxCount:=(MaxCount*10)+(byte(TFLRERawByteChar(Source[SourcePosition]))-byte(TFLRERawByteChar('0')));
           inc(SourcePosition);
          end;
          if MinCount>MaxCount then begin
@@ -12980,7 +16714,7 @@ begin
    GroupNameStringStack.Free;
   end;
   FreeUnusedNodes(AnchoredRootNode);
-  if assigned(AnchoredRootNode) then begin
+  if assigned(AnchoredRootNode) and not (rfONLYFASTOPTIMIZATIONS in Flags) then begin
    if OptimizeNode(@AnchoredRootNode) then begin
     FreeUnusedNodes(AnchoredRootNode);
    end;
@@ -13066,7 +16800,7 @@ procedure TFLRE.Compile;
   var Stack:TStackItems;
       StackItem:PStackItem;
       StackSize,Count,Argument,i0,i1,Index{$ifndef UseOpcodeJMP},FromIndex,ToIndex,OutIndex{$endif},Flags:longint;
-      CurrentChar,SingleChar:ansichar;
+      CurrentChar,SingleChar:TFLRERawByteChar;
       CharClass:TFLRECharClass;
   begin
    Stack:=nil;
@@ -13249,7 +16983,7 @@ procedure TFLRE.Compile;
          end;
          if Count=1 then begin
           i0:=NewInstruction(opSINGLECHAR);
-          Instructions[i0].Value:=byte(ansichar(SingleChar));
+          Instructions[i0].Value:=byte(TFLRERawByteChar(SingleChar));
          end else begin
           i0:=NewInstruction(opCHAR);
           Instructions[i0].Value:=ptruint(pointer(CharClasses[Node^.Value]));
@@ -13777,7 +17511,7 @@ var LowRangeString,HighRangeString:TFLRERawByteString;
   end;
  end;
  procedure ThreadPass(Instruction:PFLREInstruction;Index:longint);
- var CurrentChar:ansichar;
+ var CurrentChar:TFLRERawByteChar;
  begin
   while assigned(Instruction) do begin
    case Instruction^.IDandOpcode and $ff of
@@ -13800,20 +17534,20 @@ var LowRangeString,HighRangeString:TFLRERawByteString;
      break;
     end;
     opSINGLECHAR:begin
-     AddChars(Index,ansichar(byte(Instruction^.Value)));
+     AddChars(Index,TFLRERawByteChar(byte(Instruction^.Value)));
      inc(Index);
      Instruction:=Instruction^.Next;
     end;
     opCHAR:begin
      for CurrentChar:=#0 to #255 do begin
       if CurrentChar in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^ then begin
-       AddChars(Index,ansichar(byte(CurrentChar)));
+       AddChars(Index,TFLRERawByteChar(byte(CurrentChar)));
        break;
       end;
      end;
      for CurrentChar:=#255 downto #0 do begin
       if CurrentChar in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^ then begin
-       AddChars(Index,ansichar(byte(CurrentChar)));
+       AddChars(Index,TFLRERawByteChar(byte(CurrentChar)));
        break;
       end;
      end;
@@ -13913,7 +17647,7 @@ var Node:PFLRENode;
     NodeStrings:array of TFLRERawByteString;
     Stack:array of TStackItem;
     Stop,First,IsSingle:boolean;
-    SingleChar,CurrentChar:ansichar;
+    SingleChar,CurrentChar:TFLRERawByteChar;
     CharClass:TFLRECharClass;
 begin
  NodeStrings:=nil;
@@ -14086,7 +17820,7 @@ begin
 end;
 
 procedure TFLRE.CompileFixedStringSearch;
-var c:ansichar;
+var c:TFLRERawByteChar;
     i,j,k:longint;
     HasMatch:boolean;
 begin
@@ -14148,6 +17882,7 @@ type PThread=^TThread;
 var CurrentPosition:longint;
     Generation:int64;
     InstructionGenerations:TFLREInstructionGenerations;
+    PrefixCharClasses:TFLREPrefixCharClasses;
  procedure AddThread(const ThreadList:PThreadList;Instruction:PFLREInstruction);
  begin
   while assigned(Instruction) do begin
@@ -14182,14 +17917,14 @@ var CurrentPosition:longint;
  end;
  procedure CompilePrefixPattern;
  var CurrentPosition:longint;
-     CurrentChar:ansichar;
+     CurrentChar:TFLRERawByteChar;
  begin
   if not assigned(PrefixPatternBitMasks) then begin
    GetMem(PrefixPatternBitMasks,SizeOf(TFLRECharPatternBitMasks));
   end;
   FillChar(PrefixPatternBitMasks^,SizeOf(TFLRECharPatternBitMasks),#$0);
   for CurrentPosition:=0 to CountPrefixCharClasses-1 do begin
-   for CurrentChar:=low(ansichar) to high(ansichar) do begin
+   for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
     if CurrentChar in PrefixCharClasses[CurrentPosition] then begin
      PrefixPatternBitMasks^[CurrentChar]:=PrefixPatternBitMasks^[CurrentChar] or longword(longword(1) shl CurrentPosition);
     end;
@@ -14200,155 +17935,339 @@ var ThreadIndex,Count,TotalCount,Index:longint;
     CurrentThreadList,NewThreadList,TemporaryThreadList:PThreadList;
     CurrentThread:PThread;
     Instruction:PFLREInstruction;
-    CurrentChar:ansichar;
+    CurrentChar,LowChar,HighChar:TFLRERawByteChar;
     ThreadLists:TThreadLists;
-    HasCountPrefixCharClasses:boolean;
+    HasCountPrefixCharClasses,OK:boolean;
 begin
 
  Generation:=0;
 
- InstructionGenerations:=nil;
+ PrefixCharClasses:=nil;
  try
 
-  SetLength(InstructionGenerations,CountForwardInstructions+1);
-  for Index:=0 to length(InstructionGenerations)-1 do begin
-   InstructionGenerations[Index]:=-1;
-  end;
-
-  for CurrentPosition:=0 to FLREMaxPrefixCharClasses-1 do begin
-   PrefixCharClasses[CurrentPosition]:=[];
-  end;
-
-  CountPrefixCharClasses:=0;
-  HasCountPrefixCharClasses:=false;
-
-  ThreadLists[0].Threads:=nil;
-  ThreadLists[1].Threads:=nil;
+  InstructionGenerations:=nil;
   try
-   SetLength(ThreadLists[0].Threads,(CountForwardInstructions+1)*4);
-   SetLength(ThreadLists[1].Threads,(CountForwardInstructions+1)*4);
 
-   CurrentThreadList:=@ThreadLists[0];
-   NewThreadList:=@ThreadLists[1];
+   SetLength(PrefixCharClasses,FLREMaxPrefixCharClasses);
 
-   CurrentThreadList^.Count:=0;
-   NewThreadList^.Count:=0;
+   SetLength(InstructionGenerations,CountForwardInstructions+1);
+   for Index:=0 to length(InstructionGenerations)-1 do begin
+    InstructionGenerations[Index]:=-1;
+   end;
 
-   Generation:=1;
-   CurrentPosition:=0;
-   AddThread(CurrentThreadList,AnchoredStartInstruction);
+   for CurrentPosition:=0 to FLREMaxPrefixCharClasses-1 do begin
+    PrefixCharClasses[CurrentPosition]:=[];
+   end;
 
-   Count:=0;
+   CountPrefixCharClasses:=0;
+   HasCountPrefixCharClasses:=false;
 
-   for CurrentPosition:=0 to FLREMaxPrefixCharClasses do begin
-    if CurrentThreadList^.Count=0 then begin
-     break;
+   ThreadLists[0].Threads:=nil;
+   ThreadLists[1].Threads:=nil;
+   try
+    SetLength(ThreadLists[0].Threads,(CountForwardInstructions+1)*4);
+    SetLength(ThreadLists[1].Threads,(CountForwardInstructions+1)*4);
+
+    CurrentThreadList:=@ThreadLists[0];
+    NewThreadList:=@ThreadLists[1];
+
+    CurrentThreadList^.Count:=0;
+    NewThreadList^.Count:=0;
+
+    Generation:=1;
+    CurrentPosition:=0;
+    AddThread(CurrentThreadList,AnchoredStartInstruction);
+
+    Count:=0;
+
+    for CurrentPosition:=0 to FLREMaxPrefixCharClasses do begin
+     if CurrentThreadList^.Count=0 then begin
+      break;
+     end;
+     inc(Generation);
+     inc(Count);
+     for ThreadIndex:=0 to CurrentThreadList^.Count-1 do begin
+      CurrentThread:=@CurrentThreadList^.Threads[ThreadIndex];
+      Instruction:=CurrentThread^.Instruction;
+      case Instruction^.IDandOpcode and $ff of
+       opNONE:begin
+        // Match against nothing
+        HasCountPrefixCharClasses:=true;
+       end;
+       opSINGLECHAR:begin
+        if CurrentPosition<FLREMaxPrefixCharClasses then begin
+         PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+[TFLRERawByteChar(byte(Instruction^.Value))];
+        end;
+        AddThread(NewThreadList,Instruction^.Next);
+       end;
+       opCHAR:begin
+        if CurrentPosition<FLREMaxPrefixCharClasses then begin
+         PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+PFLRECharClass(pointer(ptruint(Instruction^.Value)))^;
+        end;
+        AddThread(NewThreadList,Instruction^.Next);
+       end;
+       opANY:begin
+        if CurrentPosition<FLREMaxPrefixCharClasses then begin
+         PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+AllCharClass;
+        end;
+        AddThread(NewThreadList,Instruction^.Next);
+       end;
+       opMATCH:begin
+        if CountPrefixCharClasses=0 then begin
+         CountPrefixCharClasses:=CurrentPosition;
+         if CountPrefixCharClasses>0 then begin
+          HasCountPrefixCharClasses:=true;
+         end;
+        end;
+       end;
+      end;
+     end;
+     TemporaryThreadList:=CurrentThreadList;
+     CurrentThreadList:=NewThreadList;
+     NewThreadList:=TemporaryThreadList;
+     NewThreadList^.Count:=0;
     end;
-    inc(Generation);
-    inc(Count);
-    for ThreadIndex:=0 to CurrentThreadList^.Count-1 do begin
-     CurrentThread:=@CurrentThreadList^.Threads[ThreadIndex];
-     Instruction:=CurrentThread^.Instruction;
-     case Instruction^.IDandOpcode and $ff of
-      opNONE:begin
-       // Match against nothing
-       HasCountPrefixCharClasses:=true;
+
+    if not HasCountPrefixCharClasses then begin
+     CountPrefixCharClasses:=Count;
+     if CountPrefixCharClasses>FLREMaxPrefixCharClasses then begin
+      CountPrefixCharClasses:=FLREMaxPrefixCharClasses;
+     end;
+    end;
+
+    TotalCount:=0;
+    for CurrentPosition:=0 to CountPrefixCharClasses-1 do begin
+     Count:=0;
+     for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+      if CurrentChar in PrefixCharClasses[CurrentPosition] then begin
+       inc(Count);
       end;
-      opSINGLECHAR:begin
-       if CurrentPosition<FLREMaxPrefixCharClasses then begin
-        PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+[ansichar(byte(Instruction^.Value))];
+     end;
+     inc(TotalCount,Count);
+    end;
+
+    if CountPrefixCharClasses>0 then begin
+     AveragePrefixCharClassesVariance:=(TotalCount+((CountPrefixCharClasses+1) div 2)) div CountPrefixCharClasses;
+    end else begin
+     AveragePrefixCharClassesVariance:=255;
+    end;
+
+    case CountPrefixCharClasses of
+     0..2:begin
+      // For so short prefixes it would be overkill in the most cases, and SBNDMQ2 do need a prefix pattern of length 3 at least
+      Exclude(InternalFlags,fifDFAFastBeginningSearch);
+     end;
+     3..15:begin
+      if AveragePrefixCharClassesVariance<(((CountPrefixCharClasses*128)+8) shr 4) then begin
+       Include(InternalFlags,fifDFAFastBeginningSearch);
+      end else begin
+       Exclude(InternalFlags,fifDFAFastBeginningSearch);
+      end;
+     end;
+     else begin
+      if AveragePrefixCharClassesVariance<128 then begin
+       Include(InternalFlags,fifDFAFastBeginningSearch);
+      end else begin
+       Exclude(InternalFlags,fifDFAFastBeginningSearch);
+      end;
+     end;
+    end;
+
+    CompilePrefixPattern;
+
+    FirstPrefixCharClassRepeatedCount:=1;
+
+    if TotalCount=2 then begin
+     case CountPrefixCharClasses of
+      2:begin
+       if PrefixCharClasses[0]=PrefixCharClasses[1] then begin
+        FirstPrefixCharClassRepeatedCount:=2;
+        CountPrefixCharClasses:=1;
        end;
-       AddThread(NewThreadList,Instruction^.Next);
       end;
-      opCHAR:begin
-       if CurrentPosition<FLREMaxPrefixCharClasses then begin
-        PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+PFLRECharClass(pointer(ptruint(Instruction^.Value)))^;
+      3:begin
+       if (PrefixCharClasses[0]=PrefixCharClasses[1]) and (PrefixCharClasses[0]=PrefixCharClasses[2]) then begin
+        FirstPrefixCharClassRepeatedCount:=3;
+        CountPrefixCharClasses:=1;
        end;
-       AddThread(NewThreadList,Instruction^.Next);
       end;
-      opANY:begin
-       if CurrentPosition<FLREMaxPrefixCharClasses then begin
-        PrefixCharClasses[CurrentPosition]:=PrefixCharClasses[CurrentPosition]+AllCharClass;
+      4:begin
+       if (PrefixCharClasses[0]=PrefixCharClasses[1]) and (PrefixCharClasses[0]=PrefixCharClasses[2]) and (PrefixCharClasses[0]=PrefixCharClasses[3]) then begin
+        FirstPrefixCharClassRepeatedCount:=4;
+        CountPrefixCharClasses:=1;
        end;
-       AddThread(NewThreadList,Instruction^.Next);
       end;
-      opMATCH:begin
-       if CountPrefixCharClasses=0 then begin
-        CountPrefixCharClasses:=CurrentPosition;
-        if CountPrefixCharClasses>0 then begin
-         HasCountPrefixCharClasses:=true;
+     end;
+    end else begin
+     case CountPrefixCharClasses of
+      2:begin
+       if PrefixCharClasses[0]=PrefixCharClasses[1] then begin
+        FirstPrefixCharClassRepeatedCount:=2;
+        CountPrefixCharClasses:=1;
+       end;
+      end;
+     end;
+    end;
+
+    case CountPrefixCharClasses of
+     1:begin
+      FirstPrefixCharClassSize:=TotalCount;
+      case FirstPrefixCharClassSize of
+       1..8:begin
+        SetLength(FirstPrefixCharClassChars,FirstPrefixCharClassSize);
+        Count:=0;
+        for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+         if CurrentChar in PrefixCharClasses[0] then begin
+          FirstPrefixCharClassChars[Count]:=CurrentChar;
+          inc(Count);
+         end;
+        end;
+       end;
+       else begin
+        Count:=0;
+        LowChar:=#$ff;
+        HighChar:=#$00;
+        for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+         if CurrentChar in PrefixCharClasses[0] then begin
+          if LowChar<=HighChar then begin
+           if (byte(TFLRERawByteChar(HighChar))+1)=byte(TFLRERawByteChar(CurrentChar)) then begin
+            HighChar:=CurrentChar;
+           end else begin
+            inc(Count);
+            LowChar:=CurrentChar;
+            HighChar:=CurrentChar;
+           end;
+          end else begin
+           LowChar:=CurrentChar;
+           HighChar:=CurrentChar;
+          end;
+         end;
+        end;
+        if LowChar<=HighChar then begin
+         inc(Count);
+        end;
+        case Count of
+         1:begin
+          CountFirstPrefixCharRanges:=1;
+          SetLength(FirstPrefixCharRanges,1);
+          Count:=0;
+          LowChar:=#$ff;
+          HighChar:=#$00;
+          for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+           if CurrentChar in PrefixCharClasses[0] then begin
+            if LowChar<=HighChar then begin
+             if (byte(TFLRERawByteChar(HighChar))+1)=byte(TFLRERawByteChar(CurrentChar)) then begin
+              HighChar:=CurrentChar;
+             end else begin
+              FirstPrefixCharRanges[Count].FromChar:=LowChar;
+              FirstPrefixCharRanges[Count].ToChar:=HighChar;
+              inc(Count);
+              LowChar:=CurrentChar;
+              HighChar:=CurrentChar;
+             end;
+            end else begin
+             LowChar:=CurrentChar;
+             HighChar:=CurrentChar;
+            end;
+           end;
+          end;
+          if LowChar<=HighChar then begin
+           FirstPrefixCharRanges[Count].FromChar:=LowChar;
+           FirstPrefixCharRanges[Count].ToChar:=HighChar;
+          end;
+         end;
+         else begin
+          CountFirstPrefixCharRanges:=0;
+          if not assigned(FirstPrefixCharClass) then begin
+           GetMem(FirstPrefixCharClass,SizeOf(TFLRECharClass));
+          end;
+          FirstPrefixCharClass^:=PrefixCharClasses[0];
+         end;
+        end;
+       end;
+      end;
+     end;
+     2:begin
+      OK:=true;
+      for CurrentPosition:=0 to CountPrefixCharClasses-1 do begin
+       Count:=0;
+       LowChar:=#$ff;
+       HighChar:=#$00;
+       for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+        if CurrentChar in PrefixCharClasses[CurrentPosition] then begin
+         if LowChar<=HighChar then begin
+          if (byte(TFLRERawByteChar(HighChar))+1)=byte(TFLRERawByteChar(CurrentChar)) then begin
+           HighChar:=CurrentChar;
+          end else begin
+           inc(Count);
+           LowChar:=CurrentChar;
+           HighChar:=CurrentChar;
+          end;
+         end else begin
+          LowChar:=CurrentChar;
+          HighChar:=CurrentChar;
+         end;
+        end;
+       end;
+       if LowChar<=HighChar then begin
+        inc(Count);
+       end;
+       if Count<>1 then begin
+        OK:=false;
+        break;
+       end;
+      end;
+      if OK then begin
+       CountFirstPrefixCharRanges:=2;
+       SetLength(FirstPrefixCharRanges,2);
+       for CurrentPosition:=0 to CountPrefixCharClasses-1 do begin
+        LowChar:=#$ff;
+        HighChar:=#$00;
+        for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
+         if CurrentChar in PrefixCharClasses[CurrentPosition] then begin
+          if LowChar<=HighChar then begin
+           if (byte(TFLRERawByteChar(HighChar))+1)=byte(TFLRERawByteChar(CurrentChar)) then begin
+            HighChar:=CurrentChar;
+           end else begin
+            FirstPrefixCharRanges[CurrentPosition].FromChar:=LowChar;
+            FirstPrefixCharRanges[CurrentPosition].ToChar:=HighChar;
+            LowChar:=CurrentChar;
+            HighChar:=CurrentChar;
+           end;
+          end else begin
+           LowChar:=CurrentChar;
+           HighChar:=CurrentChar;
+          end;
+         end;
+        end;
+        if LowChar<=HighChar then begin
+         FirstPrefixCharRanges[CurrentPosition].FromChar:=LowChar;
+         FirstPrefixCharRanges[CurrentPosition].ToChar:=HighChar;
         end;
        end;
       end;
      end;
     end;
-    TemporaryThreadList:=CurrentThreadList;
-    CurrentThreadList:=NewThreadList;
-    NewThreadList:=TemporaryThreadList;
-    NewThreadList^.Count:=0;
-   end;
 
-   if not HasCountPrefixCharClasses then begin
-    CountPrefixCharClasses:=Count;
-    if CountPrefixCharClasses>FLREMaxPrefixCharClasses then begin
-     CountPrefixCharClasses:=FLREMaxPrefixCharClasses;
-    end;
+   finally
+    SetLength(ThreadLists[0].Threads,0);
+    SetLength(ThreadLists[1].Threads,0);
    end;
-
-   TotalCount:=0;
-   for CurrentPosition:=0 to CountPrefixCharClasses-1 do begin
-    Count:=0;
-    for CurrentChar:=#0 to #255 do begin
-     if CurrentChar in PrefixCharClasses[CurrentPosition] then begin
-      inc(Count);
-     end;
-    end;
-    inc(TotalCount,Count);
-   end;
-
-   if CountPrefixCharClasses>0 then begin
-    AveragePrefixCharClassesVariance:=(TotalCount+((CountPrefixCharClasses+1) div 2)) div CountPrefixCharClasses;
-   end else begin
-    AveragePrefixCharClassesVariance:=255;
-   end;
-
-   case CountPrefixCharClasses of
-    0..2:begin
-     // For so short prefixes it would be overkill in the most cases, and SBNDMQ2 do need a prefix pattern of length 3 at least 
-     Exclude(InternalFlags,fifDFAFastBeginningSearch);
-    end;
-    3..15:begin
-     if AveragePrefixCharClassesVariance<(((CountPrefixCharClasses*128)+8) shr 4) then begin
-      Include(InternalFlags,fifDFAFastBeginningSearch);
-     end else begin
-      Exclude(InternalFlags,fifDFAFastBeginningSearch);
-     end;
-    end;
-    else begin
-     if AveragePrefixCharClassesVariance<128 then begin
-      Include(InternalFlags,fifDFAFastBeginningSearch);
-     end else begin
-      Exclude(InternalFlags,fifDFAFastBeginningSearch);
-     end;
-    end;
-   end;
-
-   CompilePrefixPattern;
 
   finally
-   SetLength(ThreadLists[0].Threads,0);
-   SetLength(ThreadLists[1].Threads,0);
+   SetLength(InstructionGenerations,0);
   end;
 
  finally
-  SetLength(InstructionGenerations,0);
+  SetLength(PrefixCharClasses,0);
  end;
+
 end;
 
 procedure TFLRE.CompileByteMapForOnePassNFAAndDFA;
 var Node:PFLRENode;
     i,ByteCount:longint;
-    CurrentChar:ansichar;
+    CurrentChar:TFLRERawByteChar;
     CharSetMap:TFLRECharClass;
     CharClass,NodeCharClass:TFLRECharClass;
     NewLines,Words:boolean;
@@ -14400,19 +18319,19 @@ begin
   end;
  end;
  if CharClass<>[] then begin
-  for CurrentChar:=#0 to #255 do begin
+  for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
    if (CurrentChar in CharClass) and not (CurrentChar in CharSetMap) then begin
     System.Include(CharSetMap,CurrentChar);
-    ByteMap[byte(ansichar(CurrentChar))]:=ByteCount;
-    UnByteMap[ByteCount]:=byte(ansichar(CurrentChar));
+    ByteMap[byte(TFLRERawByteChar(CurrentChar))]:=ByteCount;
+    UnByteMap[ByteCount]:=byte(TFLRERawByteChar(CurrentChar));
     inc(ByteCount);
    end;
   end;
  end;
  if ByteCount<256 then begin
-  for CurrentChar:=#0 to #255 do begin
+  for CurrentChar:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
    if CurrentChar in CharSetMap then begin
-    inc(ByteMap[byte(ansichar(CurrentChar))]);
+    inc(ByteMap[byte(TFLRERawByteChar(CurrentChar))]);
    end;
   end;
   inc(ByteCount);
@@ -14521,7 +18440,7 @@ begin
               CharClass:=EmptyCharClass;
              end;
              opSINGLECHAR:begin
-              CharClass:=[ansichar(byte(Instruction^.Value))];
+              CharClass:=[TFLRERawByteChar(byte(Instruction^.Value))];
              end;
              opCHAR:begin
               CharClass:=PFLRECharClass(pointer(ptruint(Instruction^.Value)))^;
@@ -14584,7 +18503,7 @@ begin
                end;
               end else begin
                for i:=0 to 255 do begin
-                if ansichar(byte(i)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^ then begin
+                if TFLRERawByteChar(byte(i)) in PFLRECharClass(pointer(ptruint(Instruction^.Value)))^ then begin
                  b:=ByteMap[i];
                  Action:=Node^.Action[b];
                  if (Action and sfImpossible)=sfImpossible then begin
@@ -14967,7 +18886,7 @@ var ThreadIndex,Count,TotalCount,Index:longint;
     CurrentThreadList,NewThreadList,TemporaryThreadList:PThreadList;
     CurrentThread:PThread;
     Instruction:PFLREInstruction;
-    CurrentChar:ansichar;
+    CurrentChar:TFLRERawByteChar;
     ThreadLists:TThreadLists;
     PossibleBeginningSplit,PossibleBeginningAnchor,PossibleEndingSplit,PossibleEndingAnchor,
     HaveEndingAnchorWithoutEndingSplit,HaveEndingAnchorWithEndingSplit,HaveEndingWithoutEndingAnchor:boolean;
@@ -15190,7 +19109,7 @@ function TFLRE.CompilePrefilterTree(RootNode:PFLRENode):TFLREPrefilterNode;
  var Left,Right,Temp,OtherTemp:TFLREPrefilterNode;
      Counter,SubCounter,IndexCounter,Count:longint;
      CharClass:TFLRECharClass;
-     SingleChar,CurrentChar:ansichar;
+     SingleChar,CurrentChar:TFLRERawByteChar;
      OK,ParentLoop:boolean;
  begin
   result:=nil;
@@ -15588,7 +19507,11 @@ begin
      result:=PtrPosChar(FixedString[1],Input,InputLength,0);
     end;
     2:begin
+{$ifdef cpux86_64}
+     result:=PtrPosCharPair(FixedString[1],FixedString[2],Input,InputLength,0);
+{$else}
      result:=PtrPosPatternSBNDMQ1(FixedStringLength,Input,InputLength,FixedStringPatternBitMasks^,0);
+{$endif}
     end;
     3..31:begin
      result:=PtrPosPatternSBNDMQ2(FixedStringLength,Input,InputLength,FixedStringPatternBitMasks^,0);
@@ -15603,7 +19526,132 @@ begin
      result:=0;
     end;
     1:begin
-     result:=PtrPosPatternCharClass(Input,InputLength,PrefixCharClasses[0],0);
+     case FirstPrefixCharClassSize of
+      1:begin
+       result:=PtrPosChar(FirstPrefixCharClassChars[0],Input,InputLength,0);
+      end;
+      2:begin
+       case FirstPrefixCharClassRepeatedCount of
+        1:begin
+         result:=PtrPosCharSetOf2(FirstPrefixCharClassChars[0],
+                                  FirstPrefixCharClassChars[1],
+                                  Input,
+                                  InputLength,
+                                  0);
+        end;
+        2:begin
+         result:=PtrPosCharSetOf2Of2(FirstPrefixCharClassChars[0],
+                                     FirstPrefixCharClassChars[1],
+                                     Input,
+                                     InputLength,
+                                     0);
+        end;
+        3:begin
+         result:=PtrPosCharSetOf2Of3(FirstPrefixCharClassChars[0],
+                                     FirstPrefixCharClassChars[1],
+                                     Input,
+                                     InputLength,
+                                     0);
+        end;
+        4:begin
+         result:=PtrPosCharSetOf2Of4(FirstPrefixCharClassChars[0],
+                                     FirstPrefixCharClassChars[1],
+                                     Input,
+                                     InputLength,
+                                     0);
+        end;
+        else begin
+         result:=0;
+        end;
+       end;
+      end;
+      3:begin
+       result:=PtrPosCharSetOf3(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      4:begin
+       result:=PtrPosCharSetOf4(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                FirstPrefixCharClassChars[3],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      5:begin
+       result:=PtrPosCharSetOf5(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                FirstPrefixCharClassChars[3],
+                                FirstPrefixCharClassChars[4],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      6:begin
+       result:=PtrPosCharSetOf6(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                FirstPrefixCharClassChars[3],
+                                FirstPrefixCharClassChars[4],
+                                FirstPrefixCharClassChars[5],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      7:begin
+       result:=PtrPosCharSetOf7(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                FirstPrefixCharClassChars[3],
+                                FirstPrefixCharClassChars[4],
+                                FirstPrefixCharClassChars[5],
+                                FirstPrefixCharClassChars[6],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      8:begin
+       result:=PtrPosCharSetOf8(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                FirstPrefixCharClassChars[2],
+                                FirstPrefixCharClassChars[3],
+                                FirstPrefixCharClassChars[4],
+                                FirstPrefixCharClassChars[5],
+                                FirstPrefixCharClassChars[6],
+                                FirstPrefixCharClassChars[7],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      else begin
+       case CountFirstPrefixCharRanges of
+        1:begin
+         result:=PtrPosCharRange(FirstPrefixCharRanges[0].FromChar,
+                                 FirstPrefixCharRanges[0].ToChar,
+                                 Input,
+                                 InputLength,
+                                 0);
+        end;
+        2:begin
+         result:=PtrPosCharRangeOf2(FirstPrefixCharRanges[0].FromChar,
+                                    FirstPrefixCharRanges[0].ToChar,
+                                    FirstPrefixCharRanges[1].FromChar,
+                                    FirstPrefixCharRanges[1].ToChar,
+                                    Input,
+                                    InputLength,
+                                    0);
+        end;
+        else begin
+         result:=PtrPosPatternCharClass(Input,InputLength,FirstPrefixCharClass^,0);
+        end;
+       end;
+      end;
+     end;
     end;
     2:begin
      result:=PtrPosPatternSBNDMQ1(CountPrefixCharClasses,Input,InputLength,PrefixPatternBitMasks^,0);
@@ -15625,7 +19673,132 @@ begin
    result:=0;
   end;
   1:begin
-   result:=PtrPosPatternCharClass(Input,InputLength,PrefixCharClasses[0],0);
+   case FirstPrefixCharClassSize of
+    1:begin
+     result:=PtrPosChar(FirstPrefixCharClassChars[0],Input,InputLength,0);
+    end;
+    2:begin
+     case FirstPrefixCharClassRepeatedCount of
+      1:begin
+       result:=PtrPosCharSetOf2(FirstPrefixCharClassChars[0],
+                                FirstPrefixCharClassChars[1],
+                                Input,
+                                InputLength,
+                                0);
+      end;
+      2:begin
+       result:=PtrPosCharSetOf2Of2(FirstPrefixCharClassChars[0],
+                                   FirstPrefixCharClassChars[1],
+                                   Input,
+                                   InputLength,
+                                   0);
+      end;
+      3:begin
+       result:=PtrPosCharSetOf2Of3(FirstPrefixCharClassChars[0],
+                                   FirstPrefixCharClassChars[1],
+                                   Input,
+                                   InputLength,
+                                   0);
+      end;
+      4:begin
+       result:=PtrPosCharSetOf2Of4(FirstPrefixCharClassChars[0],
+                                   FirstPrefixCharClassChars[1],
+                                   Input,
+                                   InputLength,
+                                   0);
+      end;
+      else begin
+       result:=0;
+      end;
+     end;
+    end;
+    3:begin
+     result:=PtrPosCharSetOf3(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    4:begin
+     result:=PtrPosCharSetOf4(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              FirstPrefixCharClassChars[3],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    5:begin
+     result:=PtrPosCharSetOf5(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              FirstPrefixCharClassChars[3],
+                              FirstPrefixCharClassChars[4],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    6:begin
+     result:=PtrPosCharSetOf6(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              FirstPrefixCharClassChars[3],
+                              FirstPrefixCharClassChars[4],
+                              FirstPrefixCharClassChars[5],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    7:begin
+     result:=PtrPosCharSetOf7(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              FirstPrefixCharClassChars[3],
+                              FirstPrefixCharClassChars[4],
+                              FirstPrefixCharClassChars[5],
+                              FirstPrefixCharClassChars[6],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    8:begin
+     result:=PtrPosCharSetOf8(FirstPrefixCharClassChars[0],
+                              FirstPrefixCharClassChars[1],
+                              FirstPrefixCharClassChars[2],
+                              FirstPrefixCharClassChars[3],
+                              FirstPrefixCharClassChars[4],
+                              FirstPrefixCharClassChars[5],
+                              FirstPrefixCharClassChars[6],
+                              FirstPrefixCharClassChars[7],
+                              Input,
+                              InputLength,
+                              0);
+    end;
+    else begin
+     case CountFirstPrefixCharRanges of
+      1:begin
+       result:=PtrPosCharRange(FirstPrefixCharRanges[0].FromChar,
+                               FirstPrefixCharRanges[0].ToChar,
+                               Input,
+                               InputLength,
+                               0);
+      end;
+      2:begin
+       result:=PtrPosCharRangeOf2(FirstPrefixCharRanges[0].FromChar,
+                                  FirstPrefixCharRanges[0].ToChar,
+                                  FirstPrefixCharRanges[1].FromChar,
+                                  FirstPrefixCharRanges[1].ToChar,
+                                  Input,
+                                  InputLength,
+                                  0);
+      end;
+      else begin
+       result:=PtrPosPatternCharClass(Input,InputLength,FirstPrefixCharClass^,0);
+      end;
+     end;
+    end;
+   end;
   end;
   2:begin
    result:=PtrPosPatternSBNDMQ1(CountPrefixCharClasses,Input,InputLength,PrefixPatternBitMasks^,0);
@@ -15954,7 +20127,7 @@ function TFLRE.PtrReplace(const Input:pointer;const InputLength:longint;const Re
 var CurrentPosition,LastEnd,i,j,e:longint;
     Captures:TFLRECaptures;
     SimpleReplacement:boolean;
-    c,cc:ansichar;
+    c,cc:TFLRERawByteChar;
     ThreadLocalStorageInstance:TFLREThreadLocalStorageInstance;
 begin
  result:='';
@@ -16638,9 +20811,9 @@ end;
 function TFLRE.DumpRegularExpression:TFLRERawByteString;
 var CharClass:TFLRECharClass;
  function ProcessNode(Node:PFLRENode;ParentPrecedence:longint):TFLRERawByteString;
- const HexChars:array[$0..$f] of ansichar='0123456789abcdef';
+ const HexChars:array[$0..$f] of TFLRERawByteChar='0123456789abcdef';
  var Count,Counter,LowChar,HighChar:longint;
-     SingleChar,CurrentChar:ansichar;
+     SingleChar,CurrentChar:TFLRERawByteChar;
  begin
   result:='';
   if assigned(Node) then begin
@@ -16697,18 +20870,18 @@ var CharClass:TFLRECharClass;
       if SingleChar in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
        result:=result+SingleChar;
       end else begin
-       result:=result+'\x'+HexChars[byte(ansichar(SingleChar)) shr 4]+HexChars[byte(ansichar(SingleChar)) and $f];
+       result:=result+'\x'+HexChars[byte(TFLRERawByteChar(SingleChar)) shr 4]+HexChars[byte(TFLRERawByteChar(SingleChar)) and $f];
       end;
      end else begin
       result:=result+'[';
       Counter:=0;
       while Counter<256 do begin
-       CurrentChar:=ansichar(byte(Counter));
+       CurrentChar:=TFLRERawByteChar(byte(Counter));
        if CurrentChar in CharClass then begin
         LowChar:=Counter;
         HighChar:=Counter;
         while Counter<256 do begin
-         CurrentChar:=ansichar(byte(Counter));
+         CurrentChar:=TFLRERawByteChar(byte(Counter));
          if CurrentChar in CharClass then begin
           HighChar:=Counter;
           inc(Counter);
@@ -16717,20 +20890,20 @@ var CharClass:TFLRECharClass;
          end;
         end;
         if LowChar=HighChar then begin
-         if ansichar(byte(LowChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
-          result:=result+ansichar(byte(LowChar));
+         if TFLRERawByteChar(byte(LowChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
+          result:=result+TFLRERawByteChar(byte(LowChar));
          end else begin
           result:=result+'\x'+HexChars[LowChar shr 4]+HexChars[LowChar and $f];
          end;
         end else begin
-         if ansichar(byte(LowChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
-          result:=result+ansichar(byte(LowChar));
+         if TFLRERawByteChar(byte(LowChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
+          result:=result+TFLRERawByteChar(byte(LowChar));
          end else begin
           result:=result+'\x'+HexChars[LowChar shr 4]+HexChars[LowChar and $f];
          end;
          result:=result+'-';
-         if ansichar(byte(HighChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
-          result:=result+ansichar(byte(HighChar));
+         if TFLRERawByteChar(byte(HighChar)) in ['a'..'z','A'..'Z','0'..'9','_','@',' ','/'] then begin
+          result:=result+TFLRERawByteChar(byte(HighChar));
          end else begin
           result:=result+'\x'+HexChars[HighChar shr 4]+HexChars[HighChar and $f];
          end;
@@ -17233,6 +21406,9 @@ begin
   if (Flags and carfUTF8)<>0 then begin
    Include(RealFlags,rfUTF8);
   end;
+  if (Flags and carfONLYFASTOPTIMIZATIONS)<>0 then begin
+   Include(RealFlags,rfONLYFASTOPTIMIZATIONS);
+  end;
   if (Flags and carfDELIMITERS)<>0 then begin
    Include(RealFlags,rfDELIMITERS);
   end;
@@ -17248,7 +21424,7 @@ begin
     s:=TFLRERawByteString(e.Message);
     Len:=length(s);
     if Len>0 then begin
-     GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+     GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
      Move(s[1],Error^[0],Len);
      Error^[Len]:=#0;
     end else begin
@@ -17309,7 +21485,7 @@ begin
      s:=TFLRE(Instance).DumpRegularExpression;
      Len:=length(s);
      if Len>0 then begin
-      GetMem(RegularExpression^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(RegularExpression^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],RegularExpression^[0],Len);
       RegularExpression^[Len]:=#0;
      end else begin
@@ -17326,7 +21502,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17361,7 +21537,7 @@ begin
      s:=TFLRE(Instance).GetPrefilterExpression;
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Expression^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Expression^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Expression^[0],Len);
       Expression^[Len]:=#0;
      end else begin
@@ -17378,7 +21554,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17413,7 +21589,7 @@ begin
      s:=TFLRE(Instance).GetPrefilterShortExpression;
      Len:=length(s);
      if Len>0 then begin
-      GetMem(ShortExpression^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(ShortExpression^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],ShortExpression^[0],Len);
       ShortExpression^[Len]:=#0;
      end else begin
@@ -17430,7 +21606,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17461,7 +21637,7 @@ begin
      s:=TFLRE(Instance).GetPrefilterSQLBooleanFullTextExpression;
      Len:=length(s);
      if Len>0 then begin
-      GetMem(SQLBooleanFullTextExpression^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(SQLBooleanFullTextExpression^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],SQLBooleanFullTextExpression^[0],Len);
       SQLBooleanFullTextExpression^[Len]:=#0;
      end else begin
@@ -17478,7 +21654,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17513,7 +21689,7 @@ begin
      s:=TFLRE(Instance).GetPrefilterSQLExpression(Field);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(SQLExpression^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(SQLExpression^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],SQLExpression^[0],Len);
       SQLExpression^[Len]:=#0;
      end else begin
@@ -17530,7 +21706,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17551,8 +21727,8 @@ begin
  LocalHighRange:='';
  try
   if TFLRE(Instance).GetRange(LocalLowRange,LocalHighRange) then begin
-   GetMem(LowRange^,(length(LocalLowRange)+1)*SizeOf(AnsiChar));
-   GetMem(HighRange^,(length(LocalHighRange)+1)*SizeOf(AnsiChar));
+   GetMem(LowRange^,(length(LocalLowRange)+1)*SizeOf(TFLRERawByteChar));
+   GetMem(HighRange^,(length(LocalHighRange)+1)*SizeOf(TFLRERawByteChar));
    if length(LocalLowRange)>0 then begin
     Move(LocalLowRange[1],LowRange^[0],length(LocalLowRange));
    end;
@@ -17631,7 +21807,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17703,7 +21879,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17787,7 +21963,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17822,7 +21998,7 @@ begin
      s:=TFLRE(Instance).PtrReplace(Input,InputLength,Replacement,ReplacementLength,StartPosition,Limit);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(ResultString^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(ResultString^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],PFLRERawByteChar(ResultString^)[0],Len);
       PFLRERawByteChar(ResultString^)[Len]:=#0;
      end else begin
@@ -17842,7 +22018,7 @@ begin
      s:=TFLRERawByteString(e.Message);
      Len:=length(s);
      if Len>0 then begin
-      GetMem(Error^,(Len+1)*SizeOf(AnsiChar));
+      GetMem(Error^,(Len+1)*SizeOf(TFLRERawByteChar));
       Move(s[1],Error^[0],Len);
       Error^[Len]:=#0;
      end else begin
@@ -17860,7 +22036,7 @@ procedure InitializeFLRE;
 const FLRESignature:TFLRERawByteString=' FLRE - yet another efficient, principled regular expression library - Version '+FLREVersionString+' - Copyright (C) 2015, Benjamin ''BeRo'' Rosseaux - benjamin@rosseaux.com - http://www.rosseaux.com ';
 {$ifdef FLRERuntimeUTF8DFATableGeneration}
  procedure InitializeUTF8DFA;
- type TAnsiCharSet=set of ansichar;
+ type TAnsiCharSet=set of TFLRERawByteChar;
 {$ifdef FLREStrictUTF8}
 { c0  8 11000000   | d0  2 11(010000) | e0 10 11100000   | f0 11 11110000
   c1  8 11000001   | d1  2 11(010001) | e1  3 111(00001) | f1  6 111100(01)
@@ -17917,16 +22093,16 @@ const FLRESignature:TFLRERawByteString=' FLRE - yet another efficient, principle
        tsQUINTAIL=6;
 {$endif}
        tsMUL=16;
-  procedure AssignCharsetToCharClass(const Charset:TAnsiCharSet;CharClass:byte);
-  var c:ansichar;
+  procedure AssignCharsetToCharClass(const Charset:TAnsiCharSet;const CharClass:byte);
+  var c:TFLRERawByteChar;
   begin
-   for c:=low(ansichar) to high(ansichar) do begin
+   for c:=low(TFLRERawByteChar) to high(TFLRERawByteChar) do begin
     if c in Charset then begin
      UTF8DFACharClasses[c]:=CharClass;
     end;
    end;
   end;
-  procedure AddTranslation(FromState,AtCharClass,ToState:byte);
+  procedure AddTranslation(const FromState,AtCharClass,ToState:byte);
   begin
    UTF8DFATransitions[(FromState*tsMUL)+AtCharClass]:=ToState*tsMUL;
   end;
@@ -18167,7 +22343,7 @@ const FLRESignature:TFLRERawByteString=' FLRE - yet another efficient, principle
 {$endif}
 {$ifdef FLRERuntimeUTF8DFATableGenerationDump}
   for i:=0 to 255 do begin
-   write(UTF8DFACharClasses[ansichar(byte(i))],',');
+   write(UTF8DFACharClasses[TFLRERawByteChar(byte(i))],',');
   end;
   writeln;
   for i:=0 to 255 do begin
