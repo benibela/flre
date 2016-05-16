@@ -8856,7 +8856,7 @@ begin
 
  Position:=StartPosition;
 
-{$ifdef cpu386}
+{$ifdef reenablebrokenflrethings}
  NewStartState:
  asm
 
@@ -9115,7 +9115,7 @@ begin
   result:=DFAMatch;
  end;
 
-{$ifdef cpu386}
+{$ifdef reenablebrokenflrethings}
  asm
 
   pushad
