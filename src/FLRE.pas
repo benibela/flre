@@ -10489,6 +10489,7 @@ begin
           HasOptimizations:=true;
           continue;
          end else if (Node^.Left^.NodeType=ntALT) or (Node^.Right^.NodeType=ntALT) then begin
+          {$ifdef reenablebrokenflrethings}
           begin
            // Prefix factoring
            Optimized:=false;
@@ -10673,6 +10674,7 @@ begin
             continue;
            end;
           end;
+          {$endif}
           begin
            NodeStack.Add(@Node^.Right);
            NodeEx:=@Node^.Left;
