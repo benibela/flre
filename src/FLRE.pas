@@ -3437,7 +3437,7 @@ end;
 {$endif}
 {$endif}
 
-{$if defined(cpux86_64) and not defined(fpc)}
+{$if defined(cpux86_64)}
 
 // Thanks to Jeffrey Lim
 
