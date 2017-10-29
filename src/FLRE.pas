@@ -28,6 +28,9 @@ or contact:
       USA
 
 *******************************************************************************)
+
+//{$define USE_MICRO_OPTIMIZATIONS} //define for amd64 assembly optimizations that do not work properly (#30, #36, #37)
+
 unit FLRE;
 {$ifdef fpc}
  {$mode delphi}
@@ -3437,7 +3440,7 @@ end;
 {$endif}
 {$endif}
 
-{$if defined(cpux86_64)}
+{$if defined(cpux86_64) and defined(USE_MICRO_OPTIMIZATIONS)}
 
 // Thanks to Jeffrey Lim
 
