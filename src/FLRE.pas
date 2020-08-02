@@ -11757,6 +11757,7 @@ asm
  push ebx
  push esi
  push edi
+ lea esp, [esp - 12]
 
   mov dword ptr ResultValue,DFAFail
 
@@ -11878,6 +11879,7 @@ asm
 
   mov eax,dword ptr ResultValue
 
+ lea esp, [esp + 12]
  pop edi
  pop esi
  pop ebx
@@ -11947,6 +11949,7 @@ asm
  push ebx
  push esi
  push edi
+ lea esp, [esp - 12]
 
   mov dword ptr ResultValue,DFAFail
 
@@ -12032,6 +12035,7 @@ asm
 
   mov eax,dword ptr ResultValue
 
+ lea esp, [esp + 12]
  pop edi
  pop esi
  pop ebx
