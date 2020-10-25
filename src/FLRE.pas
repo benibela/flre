@@ -29,8 +29,6 @@ or contact:
 
 *******************************************************************************)
 
-//{$define USE_MICRO_OPTIMIZATIONS} //define for amd64 assembly optimizations that do not work properly (#30, #36, #37)
-
 unit FLRE;
 {$ifdef fpc}
  {$mode delphi}
@@ -3607,7 +3605,7 @@ end;
 {$endif}
 {$endif}
 
-{$if defined(cpux86_64) and defined(USE_MICRO_OPTIMIZATIONS)}
+{$if defined(cpux86_64)}
 
 // Thanks to Jeffrey Lim
 
@@ -14667,7 +14665,6 @@ begin
           HasOptimizations:=true;
           continue;
          end else if (Node^.Left^.NodeType=ntALT) or (Node^.Right^.NodeType=ntALT) then begin
-          {$ifdef reenablebrokenflrethings}
           begin
            // Prefix factoring
            Optimized:=false;
@@ -14858,7 +14855,6 @@ begin
             continue;
            end;
           end;
-          {$endif}
           begin
            NodeStack.Add(@Node^.Right);
            NodeEx:=@Node^.Left;
